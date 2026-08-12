@@ -1,0 +1,37 @@
+[project]
+name = "hommi-train"
+version = "0.1.1"
+description = "Training pipeline for HoMMI diffusion policies and hommi-dataset HDF5 files"
+readme = "README.md"
+authors = [
+    { name = "umeow0716", email = "jj30462281@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "h5py>=3.16.0",
+    "hommi-dataset>=0.2.0",
+    "hommi-diffusion-policy>=0.1.7",
+    "numpy>=2.0.0",
+    "torch>=2.11",
+    "torchcodec>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+
+[project.scripts]
+hommi-train = "hommi_train.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+hommi-diffusion-policy = { git = "https://github.com/umeow0716/hommi_diffusion_policy.git" }
+hommi-dataset = { git = "https://github.com/umeow0716/hommi_dataset.git" }
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
