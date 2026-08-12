@@ -183,8 +183,13 @@ class Trainer:
             return value
         return getattr(self.policy, "shape_meta", None)
 
-    def resume(self, path: str | Path, *, restore_rng: bool = True) -> None:
-        checkpoint = load_training_checkpoint(path, map_location="cpu")
+    def restore_checkpoint(
+        self,
+        checkpoint: Mapping[str, Any],
+        *,
+        restore_rng: bool = True,
+    ) -> None:
+        """Restore an already-loaded checkpoint without reading it from disk again."""
         raw_state = restore_training_checkpoint(
             checkpoint,
             policy=self.policy,
@@ -202,6 +207,10 @@ class Trainer:
                 f"checkpoint next epoch {self.state.epoch} exceeds configured "
                 f"epochs={self.config.epochs}"
             )
+
+    def resume(self, path: str | Path, *, restore_rng: bool = True) -> None:
+        checkpoint = load_training_checkpoint(path, map_location="cpu")
+        self.restore_checkpoint(checkpoint, restore_rng=restore_rng)
 
     def _checkpoint_payload_extra(self) -> dict[str, Any]:
         return {

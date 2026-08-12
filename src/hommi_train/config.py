@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass, field, fields, replace
+from typing import Any, Literal, Mapping, TypeVar
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +90,21 @@ class DiTModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeConfig:
+    """Machine/runtime choices that are not part of the learned architecture."""
+
+    # ``auto`` resolves to CUDA when available and CPU otherwise.
+    device: str = "auto"
+    # Video decode stays on CPU by default so DataLoader workers can be used.
+    # With frame_cache="ram", CUDA can also be used for one-time preload.
+    video_device: Literal["cpu", "cuda"] = "cpu"
+    decoder_cache_size: int = 4
+    video_seek_mode: Literal["exact", "approximate"] = "exact"
+    video_num_threads: int = 1
+    progress: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class HommiTrainConfig:
     """Hierarchical configuration carried into training checkpoints."""
 
@@ -97,3 +112,40 @@ class HommiTrainConfig:
     training: DiTTrainConfig = field(default_factory=DiTTrainConfig)
     model: DiTModelConfig = field(default_factory=DiTModelConfig)
     ddim: DDIMConfig = field(default_factory=DDIMConfig)
+    runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+
+
+_ConfigT = TypeVar("_ConfigT")
+
+
+def _config_kwargs(cls: type[_ConfigT], value: Mapping[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    known = {item.name for item in fields(cls)}
+    return {key: item for key, item in value.items() if key in known}
+
+
+def hommi_train_config_from_mapping(value: Mapping[str, Any] | None) -> HommiTrainConfig:
+    """Reconstruct :class:`HommiTrainConfig` from checkpoint-friendly mappings.
+
+    Missing sections/fields use current defaults so 0.3.x checkpoints (which
+    predate ``RuntimeConfig``) remain resumable by the 0.4 CLI. Unknown fields
+    are ignored to keep this reader tolerant of newer checkpoint metadata.
+    """
+    if value is None:
+        return HommiTrainConfig()
+    if not isinstance(value, Mapping):
+        raise TypeError("training config must be a mapping")
+
+    training_kwargs = _config_kwargs(DiTTrainConfig, value.get("training"))
+    if "betas" in training_kwargs:
+        betas = training_kwargs["betas"]
+        training_kwargs["betas"] = (float(betas[0]), float(betas[1]))
+
+    return HommiTrainConfig(
+        dataset=DatasetConfig(**_config_kwargs(DatasetConfig, value.get("dataset"))),
+        training=DiTTrainConfig(**training_kwargs),
+        model=DiTModelConfig(**_config_kwargs(DiTModelConfig, value.get("model"))),
+        ddim=DDIMConfig(**_config_kwargs(DDIMConfig, value.get("ddim"))),
+        runtime=RuntimeConfig(**_config_kwargs(RuntimeConfig, value.get("runtime"))),
+    )

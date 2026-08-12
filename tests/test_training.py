@@ -236,3 +236,19 @@ def test_resume_continues_from_next_epoch_and_restores_optimizer(tmp_path: Path)
     assert final_state.global_step == 4
     assert second.ema.optimization_step == 4
     assert (second_dir / "checkpoints" / "last.pt").exists()
+
+
+def test_restore_checkpoint_accepts_preloaded_payload(tmp_path: Path) -> None:
+    first = _trainer(tmp_path / "first-preloaded", epochs=1)
+    first.fit()
+    checkpoint = load_training_checkpoint(
+        tmp_path / "first-preloaded" / "checkpoints" / "last.pt"
+    )
+
+    second = _trainer(tmp_path / "second-preloaded", epochs=2)
+    second.restore_checkpoint(checkpoint)
+    assert second.state.epoch == 1
+    assert second.state.global_step == 2
+    final = second.fit()
+    assert final.epoch == 2
+    assert final.global_step == 4

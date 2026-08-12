@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
+from .config import (
+    HommiTrainConfig,
+    hommi_train_config_from_mapping,
+)
 from .dataset import inspect_hommi_hdf5
+from .training import load_training_checkpoint
+
+
+def _add_bool(group: argparse._ArgumentGroup, *names: str, **kwargs: Any) -> None:
+    group.add_argument(*names, action=argparse.BooleanOptionalAction, **kwargs)
 
 
 def build_parser() -> argparse.ArgumentParser:
+    defaults = HommiTrainConfig()
     parser = argparse.ArgumentParser(
         prog="hommi-train",
-        description="HoMMI training pipeline (composition milestone).",
+        description="Train HoMMI diffusion policies from hommi-dataset HDF5 files.",
+        argument_default=argparse.SUPPRESS,
     )
     parser.add_argument("-i", "--input", type=Path, required=True, help="HoMMI HDF5 dataset")
     parser.add_argument(
@@ -17,30 +30,228 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("outputs/hommi"),
-        help="training output directory (used by the upcoming trainer milestone)",
+        help="run output directory (default: outputs/hommi)",
     )
     parser.add_argument(
         "--inspect-dataset",
         action="store_true",
-        help="validate the HDF5 schema and print dataset metadata",
+        help="validate HDF5 schema and print metadata without training",
     )
+    parser.add_argument("--version", action="version", version="%(prog)s 0.4.0")
+
+    d = defaults.dataset
+    group = parser.add_argument_group("Dataset options")
+    group.add_argument("--obs-horizon", type=int, help=f"observation horizon (default: {d.obs_horizon})")
+    group.add_argument("--action-horizon", type=int, help=f"action horizon (default: {d.action_horizon})")
+    group.add_argument("--image-size", type=int, help=f"square model input size (default: {d.image_size})")
+    group.add_argument("--val-ratio", type=float, help=f"episode validation ratio (default: {d.val_ratio})")
+    _add_bool(group, "--action-padding", help=f"pad action windows at episode end (default: {d.action_padding})")
+    group.add_argument("--frame-cache", choices=("none", "lru", "ram"), help=f"decoded frame cache mode (default: {d.frame_cache})")
+    group.add_argument("--frame-cache-size", type=int, help=f"LRU frame capacity (default: {d.frame_cache_size})")
+    group.add_argument("--frame-preload-batch-size", type=int, help=f"RAM preload decode batch (default: {d.frame_preload_batch_size})")
+
+    t = defaults.training
+    group = parser.add_argument_group("Training options")
+    group.add_argument("--batch-size", type=int, help=f"batch size (default: {t.batch_size})")
+    group.add_argument("--epochs", type=int, help=f"total epochs (default: {t.epochs})")
+    group.add_argument("--sample-every", type=int, help=f"sampled EMA eval cadence in epochs (default: {t.sample_every})")
+    group.add_argument("--log-grad-norm-every", type=int, help=f"gradient norm log cadence; -1 disables (default: {t.log_grad_norm_every})")
+    group.add_argument("--seed", type=int, help=f"random seed (default: {t.seed})")
+
+    group = parser.add_argument_group("Optimizer options")
+    group.add_argument("--lr", type=float, help=f"policy LR (default: {t.lr:g})")
+    group.add_argument("--obs-encoder-lr", type=float, help=f"vision backbone LR (default: {t.obs_encoder_lr:g})")
+    group.add_argument("--weight-decay", type=float, help=f"policy weight decay (default: {t.weight_decay:g})")
+    group.add_argument("--obs-encoder-weight-decay", type=float, help=f"vision backbone weight decay (default: {t.obs_encoder_weight_decay:g})")
+    group.add_argument("--warmup-steps", type=int, help=f"cosine scheduler warmup steps (default: {t.warmup_steps})")
+    group.add_argument("--clip-grad-norm", type=float, help=f"max gradient norm; 0 disables (default: {t.clip_grad_norm:g})")
+    group.add_argument("--beta1", type=float, help=f"AdamW beta1 (default: {t.betas[0]:g})")
+    group.add_argument("--beta2", type=float, help=f"AdamW beta2 (default: {t.betas[1]:g})")
+
+    m = defaults.model
+    ddim = defaults.ddim
+    group = parser.add_argument_group("DiT / diffusion options")
+    group.add_argument("--model-name", help=f"timm vision backbone (default: {m.model_name})")
+    _add_bool(group, "--pretrained", help=f"use pretrained vision backbone (default: {m.pretrained})")
+    group.add_argument("--n-action-steps", type=int, help=f"actions returned by policy (default: {m.n_action_steps})")
+    group.add_argument("--num-inference-steps", type=int, help=f"DDIM inference steps (default: {m.num_inference_steps})")
+    group.add_argument("--attention-embed-dim", type=int, help=f"DiT hidden width (default: {m.attention_embed_dim})")
+    group.add_argument("--diffusion-timestep-embed-dim", type=int, help=f"diffusion timestep embedding width (default: {m.diffusion_timestep_embed_dim})")
+    group.add_argument("--depth", type=int, help=f"DiT depth (default: {m.depth})")
+    group.add_argument("--num-heads", type=int, help=f"attention heads (default: {m.num_heads})")
+    group.add_argument("--mlp-ratio", type=float, help=f"MLP ratio (default: {m.mlp_ratio:g})")
+    group.add_argument("--train-diffusion-n-samples", type=int, help=f"diffusion samples per train example (default: {m.train_diffusion_n_samples})")
+    _add_bool(group, "--qkv-bias", help=f"enable attention QKV bias (default: {m.qkv_bias})")
+    _add_bool(group, "--use-rms-norm", help=f"use RMSNorm (default: {m.use_rms_norm})")
+    group.add_argument("--input-perturbation", type=float, help=f"input perturbation strength (default: {m.input_perturbation:g})")
+    _add_bool(group, "--obs-as-global-cond", help=f"condition globally on observation embedding (default: {m.obs_as_global_cond})")
+    _add_bool(group, "--use-flow-matching", help=f"enable flow matching path (default: {m.use_flow_matching})")
+    group.add_argument("--fm-tsampler", choices=("uniform", "beta"), help=f"flow matching timestep sampler (default: {m.fm_tsampler})")
+    group.add_argument("--num-train-timesteps", type=int, help=f"DDIM train timesteps (default: {ddim.num_train_timesteps})")
+    group.add_argument("--beta-start", type=float, help=f"DDIM beta start (default: {ddim.beta_start:g})")
+    group.add_argument("--beta-end", type=float, help=f"DDIM beta end (default: {ddim.beta_end:g})")
+    group.add_argument("--beta-schedule", help=f"DDIM beta schedule (default: {ddim.beta_schedule})")
+    _add_bool(group, "--clip-sample", help=f"DDIM clip_sample (default: {ddim.clip_sample})")
+    _add_bool(group, "--set-alpha-to-one", help=f"DDIM set_alpha_to_one (default: {ddim.set_alpha_to_one})")
+    group.add_argument("--steps-offset", type=int, help=f"DDIM steps offset (default: {ddim.steps_offset})")
+    group.add_argument("--prediction-type", help=f"DDIM prediction type (default: {ddim.prediction_type})")
+
+    r = defaults.runtime
+    group = parser.add_argument_group("Runtime options")
+    group.add_argument("--device", help=f"training device, e.g. cuda, cuda:1, cpu, auto (default: {r.device})")
+    group.add_argument("--video-device", choices=("cpu", "cuda"), help=f"TorchCodec decode device (default: {r.video_device})")
+    group.add_argument("--decoder-cache-size", type=int, help=f"open decoder LRU capacity (default: {r.decoder_cache_size})")
+    group.add_argument("--video-seek-mode", choices=("exact", "approximate"), help=f"TorchCodec seek mode (default: {r.video_seek_mode})")
+    group.add_argument("--video-num-threads", type=int, help=f"FFmpeg threads per decoder (default: {r.video_num_threads})")
+    group.add_argument("--num-workers", type=int, help=f"DataLoader workers (default: {t.num_workers})")
+    group.add_argument("--precision", choices=("fp32", "bf16"), help=f"training precision (default: {t.precision})")
+    _add_bool(group, "--pin-memory", help=f"pin DataLoader host memory (default: {t.pin_memory})")
+    _add_bool(group, "--persistent-workers", help=f"keep DataLoader workers alive (default: {t.persistent_workers})")
+    _add_bool(group, "--drop-last", help=f"drop incomplete batches (default: {t.drop_last})")
+    _add_bool(group, "--progress", help=f"show tqdm/epoch logs (default: {r.progress})")
+
+    group = parser.add_argument_group("Checkpoint options")
+    group.add_argument("--resume", type=Path, help="resume a training checkpoint; its saved config is the base for unspecified options")
+    group.add_argument("--keep-best-k", type=int, help=f"retain best K metric checkpoints (default: {t.keep_best_k})")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    if not args.inspect_dataset:
-        raise SystemExit(
-            "Dataset, split, normalization, and policy composition are implemented; "
-            "the training runner is the next milestone. "
-            "Use --inspect-dataset for now."
-        )
+def _value(args: argparse.Namespace, name: str, current: Any) -> Any:
+    return getattr(args, name, current)
 
-    info = inspect_hommi_hdf5(args.input)
+
+def config_from_args(
+    args: argparse.Namespace,
+    *,
+    base: HommiTrainConfig | None = None,
+) -> HommiTrainConfig:
+    """Apply only explicitly supplied CLI values over defaults/checkpoint config."""
+    cfg = base or HommiTrainConfig()
+    d = cfg.dataset
+    dataset = replace(
+        d,
+        obs_horizon=_value(args, "obs_horizon", d.obs_horizon),
+        action_horizon=_value(args, "action_horizon", d.action_horizon),
+        image_size=_value(args, "image_size", d.image_size),
+        val_ratio=_value(args, "val_ratio", d.val_ratio),
+        action_padding=_value(args, "action_padding", d.action_padding),
+        frame_cache=_value(args, "frame_cache", d.frame_cache),
+        frame_cache_size=_value(args, "frame_cache_size", d.frame_cache_size),
+        frame_preload_batch_size=_value(args, "frame_preload_batch_size", d.frame_preload_batch_size),
+    )
+
+    t = cfg.training
+    betas = (
+        float(_value(args, "beta1", t.betas[0])),
+        float(_value(args, "beta2", t.betas[1])),
+    )
+    training = replace(
+        t,
+        batch_size=_value(args, "batch_size", t.batch_size),
+        num_workers=_value(args, "num_workers", t.num_workers),
+        epochs=_value(args, "epochs", t.epochs),
+        lr=_value(args, "lr", t.lr),
+        obs_encoder_lr=_value(args, "obs_encoder_lr", t.obs_encoder_lr),
+        weight_decay=_value(args, "weight_decay", t.weight_decay),
+        obs_encoder_weight_decay=_value(args, "obs_encoder_weight_decay", t.obs_encoder_weight_decay),
+        warmup_steps=_value(args, "warmup_steps", t.warmup_steps),
+        clip_grad_norm=_value(args, "clip_grad_norm", t.clip_grad_norm),
+        sample_every=_value(args, "sample_every", t.sample_every),
+        log_grad_norm_every=_value(args, "log_grad_norm_every", t.log_grad_norm_every),
+        seed=_value(args, "seed", t.seed),
+        betas=betas,
+        precision=_value(args, "precision", t.precision),
+        pin_memory=_value(args, "pin_memory", t.pin_memory),
+        persistent_workers=_value(args, "persistent_workers", t.persistent_workers),
+        drop_last=_value(args, "drop_last", t.drop_last),
+        keep_best_k=_value(args, "keep_best_k", t.keep_best_k),
+    )
+
+    m = cfg.model
+    model = replace(
+        m,
+        model_name=_value(args, "model_name", m.model_name),
+        pretrained=_value(args, "pretrained", m.pretrained),
+        n_action_steps=_value(args, "n_action_steps", m.n_action_steps),
+        num_inference_steps=_value(args, "num_inference_steps", m.num_inference_steps),
+        attention_embed_dim=_value(args, "attention_embed_dim", m.attention_embed_dim),
+        diffusion_timestep_embed_dim=_value(args, "diffusion_timestep_embed_dim", m.diffusion_timestep_embed_dim),
+        depth=_value(args, "depth", m.depth),
+        num_heads=_value(args, "num_heads", m.num_heads),
+        mlp_ratio=_value(args, "mlp_ratio", m.mlp_ratio),
+        train_diffusion_n_samples=_value(args, "train_diffusion_n_samples", m.train_diffusion_n_samples),
+        qkv_bias=_value(args, "qkv_bias", m.qkv_bias),
+        use_rms_norm=_value(args, "use_rms_norm", m.use_rms_norm),
+        input_perturbation=_value(args, "input_perturbation", m.input_perturbation),
+        obs_as_global_cond=_value(args, "obs_as_global_cond", m.obs_as_global_cond),
+        use_flow_matching=_value(args, "use_flow_matching", m.use_flow_matching),
+        fm_tsampler=_value(args, "fm_tsampler", m.fm_tsampler),
+    )
+
+    dd = cfg.ddim
+    ddim = replace(
+        dd,
+        num_train_timesteps=_value(args, "num_train_timesteps", dd.num_train_timesteps),
+        beta_start=_value(args, "beta_start", dd.beta_start),
+        beta_end=_value(args, "beta_end", dd.beta_end),
+        beta_schedule=_value(args, "beta_schedule", dd.beta_schedule),
+        clip_sample=_value(args, "clip_sample", dd.clip_sample),
+        set_alpha_to_one=_value(args, "set_alpha_to_one", dd.set_alpha_to_one),
+        steps_offset=_value(args, "steps_offset", dd.steps_offset),
+        prediction_type=_value(args, "prediction_type", dd.prediction_type),
+    )
+
+    r = cfg.runtime
+    runtime = replace(
+        r,
+        device=_value(args, "device", r.device),
+        video_device=_value(args, "video_device", r.video_device),
+        decoder_cache_size=_value(args, "decoder_cache_size", r.decoder_cache_size),
+        video_seek_mode=_value(args, "video_seek_mode", r.video_seek_mode),
+        video_num_threads=_value(args, "video_num_threads", r.video_num_threads),
+        progress=_value(args, "progress", r.progress),
+    )
+    return HommiTrainConfig(
+        dataset=dataset,
+        training=training,
+        model=model,
+        ddim=ddim,
+        runtime=runtime,
+    )
+
+
+def _print_dataset_info(path: Path) -> None:
+    info = inspect_hommi_hdf5(path)
     print(f"path: {info.path}")
     print(f"type: {info.dataset_type}")
     print(f"hz: {info.hz:g}")
     print(f"arms: {', '.join(info.arm_order)}")
     print(f"episodes: {info.num_episodes}")
     print(f"samples: {info.num_samples}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "inspect_dataset", False):
+        _print_dataset_info(args.input)
+        return 0
+
+    resume = getattr(args, "resume", None)
+    base_config = None
+    checkpoint = None
+    if resume is not None:
+        checkpoint = load_training_checkpoint(resume, map_location="cpu")
+        base_config = hommi_train_config_from_mapping(checkpoint.get("config"))
+
+    config = config_from_args(args, base=base_config)
+    from .runner import run_training
+
+    run_training(
+        args.input,
+        args.output,
+        config,
+        resume_from=resume,
+        resume_checkpoint=checkpoint,
+    )
     return 0
