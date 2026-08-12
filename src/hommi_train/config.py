@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -20,7 +20,13 @@ class DatasetConfig:
 
 @dataclass(frozen=True, slots=True)
 class DiTTrainConfig:
-    """Defaults mirrored from HoMMI ``umi_policy_dit.yaml``."""
+    """HoMMI-aligned training defaults plus explicit runtime optimizations.
+
+    Model/training hyperparameters mirror ``umi_policy_dit.yaml``. ``bf16``,
+    pinned host memory, and persistent DataLoader workers are runtime choices
+    for modern NVIDIA training and are intentionally documented separately from
+    the HoMMI reference recipe.
+    """
 
     batch_size: int = 16
     num_workers: int = 8
@@ -35,6 +41,16 @@ class DiTTrainConfig:
     log_grad_norm_every: int = 50
     seed: int = 42
     betas: tuple[float, float] = (0.95, 0.999)
+
+    # Runtime optimizations. These do not change the stored model architecture.
+    precision: Literal["fp32", "bf16"] = "bf16"
+    pin_memory: bool = True
+    persistent_workers: bool = True
+    drop_last: bool = True
+
+    # Checkpoint policy. ``best.pt`` is always maintained when validation runs;
+    # these metric snapshots retain the best K historical validation epochs.
+    keep_best_k: int = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,3 +87,13 @@ class DiTModelConfig:
     obs_as_global_cond: bool = True
     use_flow_matching: bool = False
     fm_tsampler: Literal["uniform", "beta"] = "uniform"
+
+
+@dataclass(frozen=True, slots=True)
+class HommiTrainConfig:
+    """Hierarchical configuration carried into training checkpoints."""
+
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    training: DiTTrainConfig = field(default_factory=DiTTrainConfig)
+    model: DiTModelConfig = field(default_factory=DiTModelConfig)
+    ddim: DDIMConfig = field(default_factory=DDIMConfig)

@@ -3,9 +3,9 @@
 Training-side package for datasets produced by `hommi-dataset` and policies from
 `hommi-diffusion-policy`.
 
-Version **0.2.0** completes the composition layer between the HDF5 dataset and
-the policy library: episode split, training-only normalizer fitting, and a
-HoMMI-aligned DiT policy factory.
+Version **0.3.0** completes the reusable training layer: DataLoaders, optimizer
+and cosine LR scheduler construction, HoMMI EMA, BF16 autocast, sampled
+validation, atomic checkpoints, and full resume state restoration.
 
 ## Package boundary
 
@@ -26,12 +26,18 @@ hommi_train/
 │   └── hommi.py          # fit policy normalizer from training split only
 ├── policy/
 │   └── dit.py            # DDIM + DiT construction recipe
+├── training/
+│   ├── data.py           # DataLoaders + non-blocking device transfer
+│   ├── optimizer.py      # policy optimizer groups + cosine scheduler
+│   ├── ema.py            # HoMMI EMA warmup
+│   ├── metrics.py        # gradient norm + action MSE
+│   ├── checkpoint.py     # atomic save/load + RNG state
+│   └── trainer.py        # BF16 train/validation loop + resume
 ├── config.py             # one source of HoMMI-aligned defaults
 ├── cli.py
 └── __main__.py
 
 # later milestones
-hommi_train/training/      # optimizer, EMA, BF16, train/val loop, resume
 hommi_train/export/        # portable .pt + optimized eval artifact
 ```
 
@@ -83,109 +89,161 @@ HDF5 embedded H.264 (original 1920x1440)
 The persistent cache is `uint8`, not float32. `__getitem__` converts only the
 requested observation frames to short-lived float32 `[0,1]` tensors.
 
-Three cache modes are available:
-
-- `frame_cache="ram"` (default): preload referenced frames once.
-- `frame_cache="lru"`: bounded lazy decoded-frame cache.
-- `frame_cache="none"`: decode every request; useful for low-RAM CUDA/NVDEC eval.
-
 The dataset center-square crop is deterministic storage preprocessing. The DiT
-encoder's 0.95 RandomCrop/CenterCrop remains model augmentation and is not
-removed.
+encoder's 0.95 RandomCrop/CenterCrop remains model augmentation.
 
-## 0.2.0 composition flow
+## Composition flow
 
-Split **episodes first**, then construct independent datasets. This ensures the
-RAM cache and normalization statistics never include validation trajectories.
+Split **episodes first**, then build independent datasets and fit normalization
+from training only.
 
 ```python
+from pathlib import Path
+
 from hommi_train import (
-    DatasetConfig,
+    HommiTrainConfig,
     HommiHDF5Dataset,
+    Trainer,
+    build_dataloaders,
     build_dit_policy,
     build_hommi_normalizer,
     inspect_hommi_hdf5,
+    seed_everything,
     split_episode_keys,
 )
 
-path = "dataset.hdf5"
-cfg = DatasetConfig()
+path = Path("dataset.hdf5")
+output = Path("outputs/run-001")
+cfg = HommiTrainConfig()
+
+# Seed before policy construction so randomly initialized DiT weights are also
+# reproducible. Trainer checkpoints additionally preserve all RNG streams.
+seed_everything(cfg.training.seed)
+
 info = inspect_hommi_hdf5(path)
-split = split_episode_keys(info, val_ratio=cfg.val_ratio, seed=42)
-
-train_ds = HommiHDF5Dataset(
-    path,
-    episode_keys=split.train_keys,
-    obs_horizon=cfg.obs_horizon,
-    action_horizon=cfg.action_horizon,
-    image_size=cfg.image_size,
-    action_padding=cfg.action_padding,
-    frame_cache=cfg.frame_cache,
-    frame_cache_size=cfg.frame_cache_size,
-    frame_preload_batch_size=cfg.frame_preload_batch_size,
-)
-val_ds = HommiHDF5Dataset(
-    path,
-    episode_keys=split.val_keys,
-    obs_horizon=cfg.obs_horizon,
-    action_horizon=cfg.action_horizon,
-    image_size=cfg.image_size,
-    action_padding=cfg.action_padding,
-    frame_cache=cfg.frame_cache,
-    frame_cache_size=cfg.frame_cache_size,
-    frame_preload_batch_size=cfg.frame_preload_batch_size,
+split = split_episode_keys(
+    info,
+    val_ratio=cfg.dataset.val_ratio,
+    seed=cfg.training.seed,
 )
 
-normalizer = build_hommi_normalizer(train_ds)  # training split only
-policy = build_dit_policy(train_ds.shape_meta)
+common_dataset = dict(
+    obs_horizon=cfg.dataset.obs_horizon,
+    action_horizon=cfg.dataset.action_horizon,
+    image_size=cfg.dataset.image_size,
+    action_padding=cfg.dataset.action_padding,
+    frame_cache=cfg.dataset.frame_cache,
+    frame_cache_size=cfg.dataset.frame_cache_size,
+    frame_preload_batch_size=cfg.dataset.frame_preload_batch_size,
+)
+train_ds = HommiHDF5Dataset(path, episode_keys=split.train_keys, **common_dataset)
+val_ds = HommiHDF5Dataset(path, episode_keys=split.val_keys, **common_dataset)
+
+normalizer = build_hommi_normalizer(train_ds)
+policy = build_dit_policy(
+    train_ds.shape_meta,
+    model_config=cfg.model,
+    ddim_config=cfg.ddim,
+)
 policy.set_normalizer(normalizer)
+
+train_loader, val_loader = build_dataloaders(
+    train_ds,
+    val_ds,
+    cfg.training,
+)
+trainer = Trainer(
+    policy=policy,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    config=cfg.training,
+    run_config=cfg,
+    output_dir=output,
+)
+trainer.fit()
 ```
 
-### Normalization ownership
+## Training defaults
 
-`hommi_train.normalization` fits statistics; the policy applies them during both
-training and inference.
-
-Per arm:
+The training/model defaults remain aligned with the previous HoMMI DiT recipe:
 
 ```text
-RGB       identity in LinearNormalizer (vision mean/std lives in encoder)
-position  limits/range -> [-1, 1]
-rotation6 identity
-gripper   limits/range -> [-1, 1]
+batch size                16
+epochs                  1000
+lr                     7.5e-5
+vision-backbone lr      7.5e-6
+weight decay             1e-6
+warmup steps                50
+gradient clip               5.0
+sample/eval every           10 epochs
+EMA inv_gamma                1.0
+EMA power                    0.75
+EMA max                      0.9999
 ```
 
-For dual-arm data, action normalization is fitted independently per 10-D arm
-block and then concatenated in HDF5 `arm_order`.
-
-Do not fit a separate normalizer on validation data.
-
-## Policy factory
-
-`build_dit_policy(shape_meta)` owns the HoMMI training recipe while the actual
-model classes stay in `hommi-diffusion-policy`.
-
-The factory builds:
+Runtime defaults are intentionally separate from HoMMI architecture/training
+hyperparameters:
 
 ```text
-DiTObsEncoderLite
-+ DDIMScheduler
-+ DiffusionDiTImagePolicy
+precision                 bf16
+pin_memory                true
+persistent_workers        true
+frame cache               ram / uint8
 ```
 
-`DDIMConfig` exposes the previously hard-coded scheduler defaults:
+On CUDA, `precision="bf16"` uses `torch.autocast` without FP16 GradScaler.
+Unsupported CUDA devices fail early with a clear error. `precision="fp32"`
+remains available for debugging and CPU tests.
 
-- train timesteps: 50
-- beta start/end: `0.0001` / `0.02`
-- schedule: `squaredcos_cap_v2`
-- clip sample: true
-- set alpha to one: true
-- steps offset: 0
-- prediction type: `epsilon`
+## Validation behavior
 
-`DiTModelConfig` keeps the HoMMI-aligned model defaults, including ViT CLIP
-backbone, 768 hidden size, 8 blocks, 8 heads, RMSNorm, 8 action steps, 16 DDIM
-inference steps, and 8 diffusion samples per training batch.
+To preserve the previous HoMMI workspace behavior, every `sample_every` epochs
+the EMA policy evaluates:
+
+- the last train batch from the epoch;
+- one validation batch;
+- full-horizon action MSE.
+
+A later evaluation milestone will add explicit `sampled` versus `full`
+validation modes without coupling them into the core trainer.
+
+## Checkpoints and resume
+
+Training writes:
+
+```text
+output/
+└── checkpoints/
+    ├── last.pt
+    ├── best.pt
+    └── epoch=XXXX-val_action_mse_error=....pt   # best K, default 3
+```
+
+Each checkpoint includes:
+
+```text
+model state
+EMA model + EMA warmup state
+optimizer state
+LR scheduler state
+next epoch index
+global step
+best validation state
+full hierarchical run config
+shape_meta
+train/validation episode keys
+latest metrics
+Python / NumPy / Torch CPU / Torch CUDA RNG states
+```
+
+Resume is therefore a real training resume rather than a model-only load:
+
+```python
+trainer.fit(resume_from="outputs/run-001/checkpoints/last.pt")
+```
+
+`TrainerState.epoch` is the **next** epoch to execute, so an epoch-complete
+checkpoint does not repeat the completed epoch after resume.
 
 ## Dataset validation CLI
 
@@ -195,7 +253,8 @@ The final target remains:
 python -m hommi_train -i file.hdf5 -o output/
 ```
 
-The trainer loop is deliberately not wired yet. Dataset validation works now:
+The reusable trainer is implemented in 0.3.0, but the complete argparse runner
+is deliberately the **0.4.0** milestone. Dataset inspection remains available:
 
 ```bash
 python -m hommi_train -i file.hdf5 -o output/ --inspect-dataset
@@ -203,20 +262,10 @@ python -m hommi_train -i file.hdf5 -o output/ --inspect-dataset
 
 ## Next milestone
 
-The next package layer is `training/`:
-
-```text
-training/
-├── trainer.py
-├── ema.py
-├── optimizer.py
-├── checkpoint.py
-└── metrics.py
-```
-
-It will add BF16 CUDA training, DataLoader construction, HoMMI optimizer/LR
-scheduler defaults, EMA, validation, checkpoint/resume, and finally connect the
-main CLI.
+**0.4.0** connects the existing composition and trainer layers into the main
+CLI. Arguments will be grouped into dataset, training, optimizer, DiT, runtime,
+and checkpoint sections while all defaults continue to come from the config
+dataclasses rather than being duplicated in argparse.
 
 ## Lock file
 

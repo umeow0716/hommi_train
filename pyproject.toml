@@ -1,6 +1,6 @@
 [project]
 name = "hommi-train"
-version = "0.2.0"
+version = "0.3.0"
 description = "Training pipeline for HoMMI diffusion policies and hommi-dataset HDF5 files"
 readme = "README.md"
 authors = [
@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=2.0.0",
     "torch>=2.11",
     "torchcodec>=0.12,<1",
+    "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]

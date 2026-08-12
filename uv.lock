@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "hommi-train"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "diffusers" },
@@ -328,6 +328,7 @@ dependencies = [
     { name = "numpy" },
     { name = "torch" },
     { name = "torchcodec" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -345,6 +346,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "torch", specifier = ">=2.11" },
     { name = "torchcodec", specifier = ">=0.12,<1" },
+    { name = "tqdm", specifier = ">=4.66" },
 ]
 provides-extras = ["dev"]
 
