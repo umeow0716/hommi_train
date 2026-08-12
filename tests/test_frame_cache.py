@@ -81,3 +81,19 @@ def test_lru_cache_reuses_hits() -> None:
     cache.get_frames("episode_001", "left", np.array([3], dtype=np.int64))
     assert len(decoder.calls) == 2
     assert cache.num_cached_frames == 2
+
+
+def test_ram_cache_preload_progress_is_visible(capsys) -> None:
+    decoder = _FakeDecoderCache()
+    cache = HDF5VideoFrameCache(
+        decoder, image_size=8, mode="ram", preload_batch_size=2
+    )
+    cache.preload(
+        {("episode_001", "left"): np.array([3, 1, 3, 5], dtype=np.int64)},
+        progress=True,
+        desc="train preload video frames",
+    )
+
+    captured = capsys.readouterr()
+    assert "train preload video frames" in captured.err
+    assert "3/3" in captured.err

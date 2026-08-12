@@ -8,6 +8,7 @@ import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset, get_worker_info
+from tqdm.auto import tqdm
 
 from .geometry import pose7_wxyz_to_matrix, relative_pose9
 from .schema import HommiHDF5Info, inspect_hommi_hdf5, make_shape_meta
@@ -67,6 +68,8 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
         frame_cache_size: int = 2048,
         frame_preload_batch_size: int = 8,
         strict_video_attrs: bool = True,
+        progress: bool = False,
+        progress_prefix: str = "dataset",
     ) -> None:
         super().__init__()
         if obs_horizon < 1:
@@ -84,6 +87,8 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
         self.action_padding = bool(action_padding)
         self.decode_images = bool(decode_images)
         self.video_device = torch.device(video_device)
+        self.progress = bool(progress)
+        self.progress_prefix = str(progress_prefix)
 
         if self.video_device.type == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("video_device='cuda' requested but torch.cuda.is_available() is false")
@@ -130,7 +135,15 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
             preload_batch_size=frame_preload_batch_size,
         )
         if self.decode_images and frame_cache == "ram":
-            self._frame_cache.preload(self._referenced_video_frames())
+            references = self._referenced_video_frames(
+                progress=self.progress,
+                desc=f"{self.progress_prefix} scan video refs",
+            )
+            self._frame_cache.preload(
+                references,
+                progress=self.progress,
+                desc=f"{self.progress_prefix} preload video frames",
+            )
             # RAM mode is self-contained after preloading; release codec/HDF5
             # handles before DataLoader workers are created.
             self._decoder_cache.close()
@@ -163,8 +176,16 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
 
     def _load_lowdim(self, episode_keys: Sequence[str]) -> tuple[_EpisodeData, ...]:
         episodes: list[_EpisodeData] = []
+        iterator = tqdm(
+            episode_keys,
+            desc=f"{self.progress_prefix} load lowdim",
+            unit="episode",
+            mininterval=1.0,
+            dynamic_ncols=True,
+            disable=not self.progress,
+        )
         with h5py.File(self.path, "r") as h5file:
-            for episode_key in episode_keys:
+            for episode_key in iterator:
                 group = h5file[episode_key]
                 action_flat = np.asarray(group["action"][:], dtype=np.float32)
                 action = action_flat.reshape(action_flat.shape[0], self.num_arms, 8)
@@ -242,7 +263,16 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
         """
         obs_cache: dict[str, list[np.ndarray]] = {}
         action_cache: list[np.ndarray] = []
-        for obs, action in self.iter_lowdim_samples():
+        iterator = tqdm(
+            self.iter_lowdim_samples(),
+            total=len(self),
+            desc=f"{self.progress_prefix} fit normalizer",
+            unit="sample",
+            mininterval=1.0,
+            dynamic_ncols=True,
+            disable=not self.progress,
+        )
+        for obs, action in iterator:
             for key, value in obs.items():
                 obs_cache.setdefault(key, []).append(value)
             action_cache.append(action)
@@ -267,10 +297,23 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
     def num_cached_frames(self) -> int:
         return self._frame_cache.num_cached_frames
 
-    def _referenced_video_frames(self) -> dict[tuple[str, str], np.ndarray]:
+    def _referenced_video_frames(
+        self,
+        *,
+        progress: bool = False,
+        desc: str = "scan video refs",
+    ) -> dict[tuple[str, str], np.ndarray]:
         """Return only original-video frames reachable by dataset observations."""
         by_episode: dict[int, list[int]] = {}
-        for episode_idx, t in self._indices:
+        iterator = tqdm(
+            self._indices,
+            desc=desc,
+            unit="sample",
+            mininterval=1.0,
+            dynamic_ncols=True,
+            disable=not progress,
+        )
+        for episode_idx, t in iterator:
             by_episode.setdefault(episode_idx, []).extend(self._obs_indices(t).tolist())
 
         references: dict[tuple[str, str], np.ndarray] = {}

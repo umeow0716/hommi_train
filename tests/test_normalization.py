@@ -100,3 +100,23 @@ def test_dual_arm_action_normalization_is_per_arm(tmp_path: Path) -> None:
     torch.testing.assert_close(scale[3:9], torch.ones(6))
     torch.testing.assert_close(scale[13:19], torch.ones(6))
     assert "robot1_eef_pos" in normalizer.params_dict
+
+
+def test_normalizer_progress_uses_dataset_prefix(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "single.hdf5"
+    _write_single_arm(path)
+    dataset = HommiHDF5Dataset(
+        path,
+        obs_horizon=2,
+        action_horizon=3,
+        decode_images=False,
+        progress=True,
+        progress_prefix="train",
+    )
+    capsys.readouterr()  # discard lowdim-load progress from dataset construction
+
+    build_hommi_normalizer(dataset)
+
+    captured = capsys.readouterr()
+    assert "train fit normalizer" in captured.err
+    assert "6/6" in captured.err

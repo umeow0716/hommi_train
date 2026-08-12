@@ -131,11 +131,15 @@ def run_training(
         train_dataset = HommiHDF5Dataset(
             input_path,
             episode_keys=split.train_keys,
+            progress=config.runtime.progress,
+            progress_prefix="train",
             **common,
         )
         val_dataset = HommiHDF5Dataset(
             input_path,
             episode_keys=split.val_keys,
+            progress=config.runtime.progress,
+            progress_prefix="val",
             **common,
         )
         if train_dataset.shape_meta != val_dataset.shape_meta:

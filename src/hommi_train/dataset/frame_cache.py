@@ -7,6 +7,7 @@ from typing import Any, Literal, Mapping
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 from .video import HDF5VideoDecoderCache, preprocess_rgb_uint8
 
@@ -106,13 +107,22 @@ class HDF5VideoFrameCache:
         references: Mapping[tuple[str, str], np.ndarray],
         *,
         share_memory: bool = False,
+        progress: bool = False,
+        desc: str = "preload video frames",
     ) -> None:
-        """Populate ``ram`` mode with only the frame indices the dataset uses."""
+        """Populate ``ram`` mode with only the frame indices the dataset uses.
+
+        Progress is measured in unique referenced source frames, not decode calls,
+        so the total corresponds to the actual RAM working set regardless of the
+        configured ``preload_batch_size``.
+        """
         if self.mode != "ram":
             raise RuntimeError("preload() is only valid with frame cache mode='ram'")
         if self._ram:
             raise RuntimeError("RAM frame cache has already been preloaded")
 
+        normalized: list[tuple[tuple[str, str], np.ndarray]] = []
+        total_frames = 0
         for key, raw_indices in references.items():
             episode_key, side = key
             indices = np.unique(np.asarray(raw_indices, dtype=np.int64).reshape(-1))
@@ -120,15 +130,33 @@ class HDF5VideoFrameCache:
                 continue
             if np.any(indices < 0):
                 raise ValueError(f"negative video frame index in {episode_key}/{side}")
+            normalized.append((key, indices))
+            total_frames += int(indices.size)
 
-            chunks: list[torch.Tensor] = []
-            for start in range(0, indices.size, self.preload_batch_size):
-                chunk_indices = indices[start : start + self.preload_batch_size]
-                chunks.append(self._decode_preprocessed(episode_key, side, chunk_indices))
-            frames = torch.cat(chunks, dim=0)
-            if share_memory:
-                frames.share_memory_()
-            self._ram[key] = _RamVideoFrames(indices=indices, frames=frames)
+        bar = tqdm(
+            total=total_frames,
+            desc=desc,
+            unit="frame",
+            mininterval=1.0,
+            dynamic_ncols=True,
+            disable=not progress,
+        )
+        try:
+            for key, indices in normalized:
+                episode_key, side = key
+                chunks: list[torch.Tensor] = []
+                for start in range(0, indices.size, self.preload_batch_size):
+                    chunk_indices = indices[start : start + self.preload_batch_size]
+                    chunks.append(
+                        self._decode_preprocessed(episode_key, side, chunk_indices)
+                    )
+                    bar.update(int(chunk_indices.size))
+                frames = torch.cat(chunks, dim=0)
+                if share_memory:
+                    frames.share_memory_()
+                self._ram[key] = _RamVideoFrames(indices=indices, frames=frames)
+        finally:
+            bar.close()
 
     def _get_ram(
         self,

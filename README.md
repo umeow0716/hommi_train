@@ -418,7 +418,7 @@ These defaults mirror the HoMMI single-task image augmentation recipe. The crop 
 | `decoder_cache_size` | `int` | `4` | Open video decoder LRU capacity |
 | `video_seek_mode` | `exact\|approximate` | `exact` | TorchCodec seek mode |
 | `video_num_threads` | `int` | `1` | FFmpeg threads per decoder |
-| `progress` | `bool` | `true` | Show progress/log output |
+| `progress` | `bool` | `true` | Show dataset preload, normalizer, and training progress |
 
 Hardware-aware defaults intentionally affect runtime only:
 
