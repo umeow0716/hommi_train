@@ -1,0 +1,138 @@
+format_version: 1
+task:
+  name: example_single_arm
+  dataset_path: dataset.hdf5
+  dataset_type: single-arm
+  hz: 20.0
+  arm_order:
+  - left
+  shape_meta:
+    image_resolution: 224
+    obs:
+      camera0_main_rgb:
+        shape:
+        - 3
+        - 224
+        - 224
+        horizon: 2
+        type: rgb
+        ignore_by_policy: false
+      robot0_eef_pos:
+        shape:
+        - 3
+        horizon: 2
+        type: low_dim
+        ignore_by_policy: false
+      robot0_eef_rot_axis_angle:
+        raw_shape:
+        - 3
+        shape:
+        - 6
+        horizon: 2
+        type: low_dim
+        rotation_rep: rotation_6d
+        ignore_by_policy: false
+      robot0_gripper_width:
+        shape:
+        - 1
+        horizon: 2
+        type: low_dim
+        ignore_by_policy: false
+    action:
+      shape:
+      - 10
+      horizon: 16
+      rotation_rep: rotation_6d
+config:
+  dataset:
+    obs_horizon: 2
+    action_horizon: 16
+    image_size: 224
+    val_ratio: 0.05
+    action_padding: true
+    frame_cache: ram
+    frame_cache_size: 2048
+    frame_preload_batch_size: 8
+  training:
+    batch_size: 16
+    num_workers: 8
+    epochs: 1000
+    lr: 7.5e-05
+    obs_encoder_lr: 7.5e-06
+    weight_decay: 1.0e-06
+    obs_encoder_weight_decay: 1.0e-06
+    warmup_steps: 50
+    clip_grad_norm: 5.0
+    sample_every: 10
+    log_grad_norm_every: 50
+    seed: 42
+    betas:
+    - 0.95
+    - 0.999
+    precision: auto
+    pin_memory: auto
+    persistent_workers: true
+    drop_last: true
+    keep_best_k: 3
+  model:
+    encoder:
+      model_name: vit_base_patch16_clip_224.openai
+      pretrained: true
+      frozen: false
+      global_pool: ''
+      feature_aggregation: cls
+      use_group_norm: true
+      share_rgb_model: true
+      use_vision_norm: true
+      train_crop_ratio: 0.95
+      eval_crop_ratio: 0.95
+      color_jitter_brightness: 0.3
+      color_jitter_contrast: 0.4
+      color_jitter_saturation: 0.5
+      color_jitter_hue: 0.08
+    n_action_steps: 8
+    num_inference_steps: 16
+    attention_embed_dim: 768
+    diffusion_timestep_embed_dim: 256
+    depth: 8
+    num_heads: 8
+    mlp_ratio: 4.0
+    train_diffusion_n_samples: 8
+    qkv_bias: true
+    use_rms_norm: true
+    input_perturbation: 0.0
+    obs_as_global_cond: true
+    use_flow_matching: false
+    fm_tsampler: uniform
+  ddim:
+    num_train_timesteps: 50
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+  runtime:
+    device: auto
+    video_device: cpu
+    decoder_cache_size: 4
+    video_seek_mode: exact
+    video_num_threads: 1
+    progress: true
+  evaluation:
+    mode: sampled
+    seed: 42
+    precision: auto
+    backend: auto
+    compile_mode: reduce-overhead
+    tensorrt:
+      min_block_size: 5
+      optimization_level: 3
+      dynamic: false
+      compile_backbone: true
+      compile_denoiser: true
+  export:
+    auto_export: true
+    source: best
+    artifact_name: model.pt

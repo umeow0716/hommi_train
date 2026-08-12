@@ -1,4 +1,4 @@
-"""HoMMI training, evaluation, and deployment utilities."""
+"""HoMMI training, evaluation, configuration, and deployment utilities."""
 
 from .config import (
     DDIMConfig,
@@ -9,16 +9,33 @@ from .config import (
     ExportConfig,
     HommiTrainConfig,
     RuntimeConfig,
+    TensorRTConfig,
     hommi_train_config_from_mapping,
+)
+from .configuration import (
+    TASK_CONFIG_VERSION,
+    TaskConfigFile,
+    TaskMetadata,
+    init_task_config,
+    load_task_config,
+    save_task_config,
+    validate_task_against_dataset,
 )
 from .dataset import (
     EpisodeSplit,
     HommiHDF5Dataset,
     HommiHDF5Info,
     inspect_hommi_hdf5,
+    make_shape_meta,
     split_episode_keys,
 )
-from .evaluation import EvaluationResult, evaluate_policy, run_evaluation
+from .evaluation import (
+    EvaluationResult,
+    configure_evaluation_backend,
+    evaluate_policy,
+    run_evaluation,
+    tensorrt_available,
+)
 from .export import (
     PolicyInferenceModule,
     build_inference_module,
@@ -32,6 +49,13 @@ from .export import (
 from .normalization import build_hommi_normalizer
 from .policy import build_ddim_scheduler, build_dit_policy
 from .runner import run_training
+from .runtime import (
+    ResolvedAccelerator,
+    resolve_accelerator,
+    resolve_device,
+    resolve_pin_memory,
+    resolve_precision,
+)
 from .training import (
     HommiEMAModel,
     Trainer,
@@ -57,7 +81,12 @@ __all__ = [
     "HommiHDF5Info",
     "HommiTrainConfig",
     "PolicyInferenceModule",
+    "ResolvedAccelerator",
     "RuntimeConfig",
+    "TASK_CONFIG_VERSION",
+    "TaskConfigFile",
+    "TaskMetadata",
+    "TensorRTConfig",
     "Trainer",
     "TrainerState",
     "build_dataloaders",
@@ -67,20 +96,31 @@ __all__ = [
     "build_inference_module",
     "build_lr_scheduler",
     "build_optimizer",
+    "configure_evaluation_backend",
     "evaluate_policy",
     "export_policy_pt2",
     "export_portable_model_pt2",
     "hommi_train_config_from_mapping",
+    "init_task_config",
     "inspect_hommi_hdf5",
     "load_portable_payload",
     "load_portable_policy",
+    "load_task_config",
     "load_training_checkpoint",
+    "make_shape_meta",
+    "resolve_accelerator",
+    "resolve_device",
+    "resolve_pin_memory",
+    "resolve_precision",
     "run_evaluation",
     "run_export",
     "run_training",
     "save_portable_checkpoint_model",
+    "save_task_config",
     "seed_everything",
     "split_episode_keys",
+    "tensorrt_available",
+    "validate_task_against_dataset",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.1"

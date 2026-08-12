@@ -1,273 +1,419 @@
 # hommi-train
 
-Training, evaluation, and deployment tooling for datasets produced by
-`hommi-dataset` and policies from `hommi-diffusion-policy`.
+Training, evaluation, configuration, and deployment tooling for HoMMI-style diffusion policies.
 
-Version **0.5.0** completes the original repository roadmap:
+`hommi-train` consumes HDF5 datasets created by [`hommi-dataset`](https://github.com/umeow0716/hommi_dataset), builds policies from [`hommi-diffusion-policy`](https://github.com/umeow0716/hommi_diffusion_policy), and provides a task-YAML workflow from dataset inspection through training, TensorRT-accelerated evaluation, checkpointing, and portable model export.
 
-```text
-HDF5 dataset
-  -> episode split
-  -> compact uint8 frame cache
-  -> training-only normalizer fitting
-  -> HoMMI DiT policy
-  -> BF16 Trainer / EMA / checkpoints
-  -> portable EMA model.pt
-  -> sampled/full evaluation
-  -> optional torch.compile / torch.export inference paths
+## Requirements
+
+- Python 3.12+
+- NVIDIA CUDA environment for TensorRT evaluation
+- PyTorch, Torch-TensorRT, and TensorRT versions that are mutually compatible
+
+TensorRT support is a **required package dependency**, not an optional extra. This intentionally makes the published package target Torch-TensorRT-supported hosts (official prebuilt Torch-TensorRT packages are provided for Linux x86 and Windows). The package still keeps eager PyTorch fallback paths for environments where CUDA is unavailable, so dataset inspection and configuration tooling remain usable after installation.
+
+## Installation
+
+### pip
+
+After the packages are published:
+
+```bash
+python -m pip install hommi-train
 ```
 
-## Repository layout
+From a local checkout:
 
-```text
-src/hommi_train/
-├── dataset/
-│   ├── geometry.py
-│   ├── schema.py
-│   ├── split.py
-│   ├── video.py
-│   ├── frame_cache.py
-│   └── hommi_hdf5.py
-├── normalization/
-│   └── hommi.py
-├── policy/
-│   └── dit.py
-├── training/
-│   ├── data.py
-│   ├── optimizer.py
-│   ├── ema.py
-│   ├── metrics.py
-│   ├── checkpoint.py
-│   └── trainer.py
-├── evaluation/
-│   ├── evaluator.py
-│   └── runner.py
-├── export/
-│   ├── artifact.py
-│   ├── torch_export.py
-│   └── runner.py
-├── runner.py
-├── config.py
-├── cli.py
-└── __main__.py
+```bash
+python -m pip install .
 ```
 
-`hommi-diffusion-policy` remains the reusable model/runtime library.
-`hommi-train` owns HDF5 layout, train/val split, normalization statistics,
-training recipes, evaluation, and deployment artifact composition.
+### uv
 
-## Train
+Install into the active environment:
 
-The original one-command interface remains unchanged:
+```bash
+uv pip install hommi-train
+```
+
+Or add it to an existing uv project:
+
+```bash
+uv add hommi-train
+```
+
+From a local checkout:
+
+```bash
+uv pip install .
+```
+
+`hommi-train` also installs a console-script entry point, but this README uses the module form consistently:
+
+```bash
+python -m hommi_train --help
+```
+
+Inside a uv-managed project, use:
+
+```bash
+uv run python -m hommi_train --help
+```
+
+> `hommi-dataset` and `hommi-diffusion-policy` must also be published/installable before a registry install of `hommi-train` can resolve them. For local repository development, this project keeps uv Git sources for those dependencies.
+
+## Quick start
+
+### 1. Generate a task YAML from HDF5
+
+```bash
+python -m hommi_train init-config \
+  -i data/pick_place.hdf5 \
+  -o configs/tasks/pick_place.yaml \
+  --name pick_place
+```
+
+With uv:
+
+```bash
+uv run python -m hommi_train init-config \
+  -i data/pick_place.hdf5 \
+  -o configs/tasks/pick_place.yaml \
+  --name pick_place
+```
+
+The generated YAML contains:
+
+- dataset path and metadata
+- arm order and dataset rate
+- complete `shape_meta`
+- HoMMI-aligned dataset/training/DiT/DDIM defaults
+- encoder augmentation settings
+- runtime accelerator settings
+- evaluation/TensorRT settings
+- export settings
+
+### 2. Train from YAML
 
 ```bash
 python -m hommi_train \
-    -i dataset.hdf5 \
-    -o outputs/run-001
+  -c configs/tasks/pick_place.yaml \
+  -o runs/pick_place
 ```
 
-or:
-
-```bash
-hommi-train -i dataset.hdf5 -o outputs/run-001
-```
-
-The default configuration follows the HoMMI DiT recipe while runtime choices
-such as BF16, pinned memory, persistent workers, and the uint8 RAM frame cache
-remain explicitly separate optimizations.
-
-Typical overrides:
+The HDF5 path can still be overridden explicitly:
 
 ```bash
 python -m hommi_train \
-    -i dataset.hdf5 \
-    -o outputs/run-001 \
-    --batch-size 32 \
-    --lr 1e-4 \
-    --epochs 1200
+  -c configs/tasks/pick_place.yaml \
+  -i /datasets/pick_place_v2.hdf5 \
+  -o runs/pick_place_v2
 ```
 
-Resume restores model, EMA, optimizer, scheduler, RNG streams, progress, and the
-original episode split:
+CLI values override YAML values for ordinary hyperparameters:
 
 ```bash
 python -m hommi_train \
-    -i dataset.hdf5 \
-    -o outputs/run-001 \
-    --resume outputs/run-001/checkpoints/last.pt
+  -c configs/tasks/pick_place.yaml \
+  -o runs/pick_place_bs32 \
+  --batch-size 32 \
+  --lr 1e-4
 ```
 
-When reconstructing a resume checkpoint, pretrained timm initialization is
-skipped because the checkpoint already contains the complete vision-backbone
-state.
+For uv-managed environments, prefix the same commands with `uv run`:
 
-## Output
+```bash
+uv run python -m hommi_train \
+  -c configs/tasks/pick_place.yaml \
+  -o runs/pick_place
+```
 
-By default a completed run contains:
+Shape-changing settings such as image size or horizons are validated against the YAML `shape_meta`. Regenerate the task YAML after changing them.
+
+### 3. Evaluate with TensorRT
+
+On CUDA, `backend=auto` selects TensorRT when the required Torch-TensorRT runtime imports successfully. You can request it explicitly:
+
+```bash
+python -m hommi_train eval \
+  -i data/pick_place.hdf5 \
+  -m runs/pick_place/model.pt \
+  --mode full \
+  --device cuda \
+  --backend tensorrt
+```
+
+With uv:
+
+```bash
+uv run python -m hommi_train eval \
+  -i data/pick_place.hdf5 \
+  -m runs/pick_place/model.pt \
+  --mode full \
+  --device cuda \
+  --backend tensorrt
+```
+
+TensorRT compilation targets the compute-heavy vision backbone and ActionDiT denoiser. DDIM scheduler orchestration stays in PyTorch.
+
+### 4. Evaluate from Python
+
+The public API exposes the same evaluation pipeline used by the CLI:
+
+```python
+from hommi_train import run_evaluation
+
+result = run_evaluation(
+    "data/pick_place.hdf5",
+    "runs/pick_place/model.pt",
+    mode="full",
+    device="cuda",
+    precision="auto",
+    backend="tensorrt",
+)
+
+print(result.to_dict())
+```
+
+A standalone version is included at [`examples/eval.py`](https://github.com/umeow0716/hommi_train/blob/main/examples/eval.py).
+
+## Task YAML
+
+A generated task file has the following top-level structure:
+
+```yaml
+format_version: 1
+
+task:
+  name: pick_place
+  dataset_path: ../../data/pick_place.hdf5
+  dataset_type: single-arm
+  hz: 20.0
+  arm_order: [left]
+  shape_meta:
+    image_resolution: 224
+    obs:
+      camera0_main_rgb:
+        shape: [3, 224, 224]
+        horizon: 2
+        type: rgb
+        ignore_by_policy: false
+      robot0_eef_pos:
+        shape: [3]
+        horizon: 2
+        type: low_dim
+        ignore_by_policy: false
+    action:
+      shape: [10]
+      horizon: 16
+      rotation_rep: rotation_6d
+
+config:
+  dataset: {...}
+  training: {...}
+  model:
+    encoder: {...}
+  ddim: {...}
+  runtime: {...}
+  evaluation: {...}
+  export: {...}
+```
+
+A complete editable reference lives at [`configs/default.yaml`](https://github.com/umeow0716/hommi_train/blob/main/configs/default.yaml).
+
+Relative `task.dataset_path` values are resolved relative to the YAML file, so task configs can be committed to the repository and moved with the project.
+
+Task YAML loading is strict: unknown or misspelled configuration keys are rejected instead of silently falling back to defaults. Checkpoint loading remains backward-compatible and migrates the older 0.3–0.5 encoder fields automatically.
+
+## Configuration reference
+
+### `DatasetConfig`
+
+| Parameter | Type | Default | Description |
+|---|---|---:|---|
+| `obs_horizon` | `int` | `2` | Observation history length |
+| `action_horizon` | `int` | `16` | Predicted action horizon |
+| `image_size` | `int` | `224` | Square RGB model input |
+| `val_ratio` | `float` | `0.05` | Episode-level validation ratio |
+| `action_padding` | `bool` | `true` | Pad action windows at episode end |
+| `frame_cache` | `none\|lru\|ram` | `ram` | Decoded image working-set cache |
+| `frame_cache_size` | `int` | `2048` | LRU capacity when using `lru` |
+| `frame_preload_batch_size` | `int` | `8` | Batch size used while preloading RAM cache |
+
+The persistent RAM frame cache stores resized `uint8 CHW` frames, not decoded 1920×1440 float images.
+
+### `DiTObsEncoderConfig` (`hommi-diffusion-policy`)
+
+Encoder settings are defined by the reusable policy package and passed through by `hommi-train`.
+
+| Parameter | Type | Default | Description |
+|---|---|---:|---|
+| `model_name` | `str` | `vit_base_patch16_clip_224.openai` | timm backbone |
+| `pretrained` | `bool` | `true` | Initialize pretrained backbone for new runs |
+| `frozen` | `bool` | `false` | Freeze backbone parameters |
+| `global_pool` | `str` | `""` | timm global pooling argument |
+| `feature_aggregation` | `cls\|avg\|max` | `cls` | Token feature aggregation |
+| `use_group_norm` | `bool` | `true` | HoMMI compatibility setting |
+| `share_rgb_model` | `bool` | `true` | Share one backbone across RGB streams |
+| `use_vision_norm` | `bool` | `true` | Apply timm pretrained mean/std |
+| `train_crop_ratio` | `float` | `0.95` | RandomCrop ratio during training |
+| `eval_crop_ratio` | `float` | `0.95` | CenterCrop ratio during evaluation |
+| `color_jitter_brightness` | `float` | `0.3` | Training ColorJitter brightness |
+| `color_jitter_contrast` | `float` | `0.4` | Training ColorJitter contrast |
+| `color_jitter_saturation` | `float` | `0.5` | Training ColorJitter saturation |
+| `color_jitter_hue` | `float` | `0.08` | Training ColorJitter hue |
+
+These defaults mirror the HoMMI single-task image augmentation recipe. The crop ratios are no longer hard-coded inside `hommi-train`.
+
+### `DiTModelConfig`
+
+| Parameter | Type | Default |
+|---|---|---:|
+| `encoder` | `DiTObsEncoderConfig` | HoMMI encoder defaults |
+| `n_action_steps` | `int` | `8` |
+| `num_inference_steps` | `int` | `16` |
+| `attention_embed_dim` | `int` | `768` |
+| `diffusion_timestep_embed_dim` | `int` | `256` |
+| `depth` | `int` | `8` |
+| `num_heads` | `int` | `8` |
+| `mlp_ratio` | `float` | `4.0` |
+| `train_diffusion_n_samples` | `int` | `8` |
+| `qkv_bias` | `bool` | `true` |
+| `use_rms_norm` | `bool` | `true` |
+| `input_perturbation` | `float` | `0.0` |
+| `obs_as_global_cond` | `bool` | `true` |
+| `use_flow_matching` | `bool` | `false` |
+| `fm_tsampler` | `uniform\|beta` | `uniform` |
+
+### `DDIMConfig`
+
+| Parameter | Type | Default |
+|---|---|---:|
+| `num_train_timesteps` | `int` | `50` |
+| `beta_start` | `float` | `0.0001` |
+| `beta_end` | `float` | `0.02` |
+| `beta_schedule` | `str` | `squaredcos_cap_v2` |
+| `clip_sample` | `bool` | `true` |
+| `set_alpha_to_one` | `bool` | `true` |
+| `steps_offset` | `int` | `0` |
+| `prediction_type` | `str` | `epsilon` |
+
+### `DiTTrainConfig`
+
+| Parameter | Type | Default |
+|---|---|---:|
+| `batch_size` | `int` | `16` |
+| `num_workers` | `int` | `8` |
+| `epochs` | `int` | `1000` |
+| `lr` | `float` | `7.5e-5` |
+| `obs_encoder_lr` | `float` | `7.5e-6` |
+| `weight_decay` | `float` | `1e-6` |
+| `obs_encoder_weight_decay` | `float` | `1e-6` |
+| `warmup_steps` | `int` | `50` |
+| `clip_grad_norm` | `float` | `5.0` |
+| `sample_every` | `int` | `10` |
+| `log_grad_norm_every` | `int` | `50` |
+| `seed` | `int` | `42` |
+| `betas` | `[float, float]` | `[0.95, 0.999]` |
+| `precision` | `auto\|fp32\|bf16` | `auto` |
+| `pin_memory` | `auto\|bool` | `auto` |
+| `persistent_workers` | `bool` | `true` |
+| `drop_last` | `bool` | `true` |
+| `keep_best_k` | `int` | `3` |
+
+### `RuntimeConfig`
+
+| Parameter | Type | Default | Behavior |
+|---|---|---:|---|
+| `device` | `str` | `auto` | Uses PyTorch's current available accelerator, otherwise CPU |
+| `video_device` | `cpu\|cuda` | `cpu` | TorchCodec decoder device |
+| `decoder_cache_size` | `int` | `4` | Open video decoder LRU capacity |
+| `video_seek_mode` | `exact\|approximate` | `exact` | TorchCodec seek mode |
+| `video_num_threads` | `int` | `1` | FFmpeg threads per decoder |
+| `progress` | `bool` | `true` | Show progress/log output |
+
+Hardware-aware defaults intentionally affect runtime only:
 
 ```text
-outputs/run-001/
+device=auto
+  -> torch.accelerator current available device
+  -> CPU fallback
+
+precision=auto
+  -> CUDA + BF16 support: BF16
+  -> otherwise: FP32
+
+pin_memory=auto
+  -> CUDA: true
+  -> otherwise: false
+```
+
+`auto` deliberately does **not** guess batch size, learning rate, or worker count. Those depend on model shape, dataset, VRAM, storage, and the training objective; the package keeps the HoMMI recipe defaults unless you override them in YAML or on the CLI.
+
+Batch size, learning rate, and worker count are **not** guessed from hardware because there is no universally optimal value without workload-specific benchmarking.
+
+### `EvaluationConfig`
+
+| Parameter | Type | Default |
+|---|---|---:|
+| `mode` | `sampled\|full` | `sampled` |
+| `seed` | `int` | `42` |
+| `precision` | `auto\|fp32\|bf16` | `auto` |
+| `backend` | `auto\|eager\|inductor\|tensorrt` | `auto` |
+| `compile_mode` | `str` | `reduce-overhead` |
+| `tensorrt` | `TensorRTConfig` | see below |
+
+### `TensorRTConfig`
+
+| Parameter | Type | Default | Description |
+|---|---|---:|---|
+| `min_block_size` | `int` | `5` | Minimum TensorRT-capable operator block |
+| `optimization_level` | `int` | `3` | TensorRT compilation optimization level |
+| `dynamic` | `bool` | `false` | Compile dynamic shapes |
+| `compile_backbone` | `bool` | `true` | TensorRT compile timm vision backbone(s) |
+| `compile_denoiser` | `bool` | `true` | TensorRT compile ActionDiT denoiser |
+
+TensorRT compilation deliberately targets the compute-heavy vision backbone and ActionDiT module. The DDIM scheduler loop remains PyTorch, avoiding unnecessary coupling between Python scheduler orchestration and TensorRT graph conversion. With `precision: bf16` (including `precision: auto` on a BF16-capable CUDA device), the TensorRT backend enables graph-aware BF16 autocast for eligible TensorRT segments while retaining sensitive operations in FP32. The `torch.compile(..., backend="torch_tensorrt")` path is JIT: the first matching batch shape pays compilation cost, while later batches in the same process reuse the compiled engine.
+
+### `ExportConfig`
+
+| Parameter | Type | Default |
+|---|---|---:|
+| `auto_export` | `bool` | `true` |
+| `source` | `best\|last` | `best` |
+| `artifact_name` | `str` | `model.pt` |
+
+## Training outputs and resume
+
+A normal run produces:
+
+```text
+runs/pick_place/
 ├── checkpoints/
 │   ├── last.pt
 │   ├── best.pt
-│   └── epoch=XXXX-val_action_mse_error=....pt
+│   └── epoch=....pt
 └── model.pt
 ```
 
-`checkpoints/*.pt` are **training checkpoints** and contain optimizer/scheduler,
-RNG, and trainer state.
+`checkpoints/*.pt` contain model, EMA, optimizer, scheduler, trainer progress, RNG state, config, and train/validation split.
 
-`model.pt` is the **portable inference artifact**. It contains only the EMA
-policy state plus the information required to reconstruct it:
-
-```text
-policy_state           EMA state_dict, including normalizer
-shape_meta             observation/action contract
-config                  model + DDIM + dataset/runtime metadata
-val_episode_keys        reproducible validation split
-metrics                 checkpoint metrics
-provenance              epoch/global step/source checkpoint
-```
-
-It intentionally excludes optimizer, LR scheduler, training RNG state, and the
-non-EMA training model.
-
-The artifact is loaded through PyTorch's restricted `weights_only=True` loader.
-
-### Post-training export controls
-
-Portable EMA export is enabled by default and uses `best.pt` when available:
-
-```text
---auto-export / --no-auto-export
---export-source best|last
---artifact-name model.pt
-```
-
-## Explicit export
-
-A checkpoint can be stripped independently of training:
+Resume:
 
 ```bash
-python -m hommi_train export \
-    -c outputs/run-001/checkpoints/best.pt \
-    -o outputs/run-001/model.pt
+python -m hommi_train \
+  -c configs/tasks/pick_place.yaml \
+  -o runs/pick_place \
+  --resume runs/pick_place/checkpoints/last.pt
 ```
 
-If `-o` is omitted and the checkpoint lives under `checkpoints/`, the default is
-`../model.pt`.
+The checkpoint's saved training config and episode split are authoritative during resume; explicit CLI options can still override non-shape hyperparameters.
 
-### Experimental torch.export PT2
+`model.pt` is the compact EMA inference artifact and excludes optimizer/scheduler/training RNG state.
 
-`model.pt` is the primary artifact. A static-batch `torch.export` artifact can be
-attempted explicitly:
+## Dataset representation
 
-```bash
-python -m hommi_train export \
-    -c outputs/run-001/checkpoints/best.pt \
-    -o outputs/run-001/model.pt \
-    --pt2 outputs/run-001/model.pt2 \
-    --device cuda \
-    --batch-size 1
-```
-
-The PT2 wrapper exposes active observations as a positional tensor tuple in a
-stable, metadata-recorded key order and returns the executable action chunk.
-The `.pt2` archive embeds `hommi_metadata.json` with `obs_keys`, `shape_meta`,
-and the static export batch size.
-
-Full diffusion inference has to be exportable as one graph. If PT2 generation
-fails, the command reports the exporter error while keeping the already-created
-portable `model.pt`; it never silently creates a partial artifact.
-
-## Evaluation
-
-Evaluate the exact validation split saved in `model.pt`:
-
-```bash
-python -m hommi_train eval \
-    -i dataset.hdf5 \
-    -m outputs/run-001/model.pt
-```
-
-The default `sampled` mode consumes one validation batch to preserve the
-historical HoMMI workspace metric behavior.
-
-Full validation:
-
-```bash
-python -m hommi_train eval \
-    -i dataset.hdf5 \
-    -m outputs/run-001/model.pt \
-    --mode full \
-    -o outputs/run-001/evaluation.json
-```
-
-`full` evaluation uses `drop_last=False` and aggregates squared error by action
-element, so the incomplete final batch is weighted correctly.
-
-The result contains:
-
-```json
-{
-  "mode": "full",
-  "action_mse": 0.0,
-  "num_batches": 0,
-  "num_samples": 0,
-  "num_action_values": 0,
-  "device": "cuda",
-  "precision": "bf16"
-}
-```
-
-The numerical values above are only a schema example.
-
-Diffusion evaluation uses a local forked RNG stream and a fixed seed, so running
-evaluation does not perturb the caller's global Torch RNG state.
-
-### CUDA runtime compilation
-
-Portable `model.pt` remains ordinary PyTorch and can use runtime compilation:
-
-```bash
-python -m hommi_train eval \
-    -i dataset.hdf5 \
-    -m outputs/run-001/model.pt \
-    --device cuda \
-    --compile \
-    --compile-mode reduce-overhead
-```
-
-Programmatic edge inference can use `build_inference_module(..., compile=True)`
-to wrap the dictionary policy API behind a tensor-only module.
-
-## Programmatic inference
-
-```python
-from hommi_train import (
-    build_inference_module,
-    load_portable_policy,
-)
-
-policy, artifact = load_portable_policy(
-    "outputs/run-001/model.pt",
-    device="cuda",
-)
-
-module = build_inference_module(
-    policy,
-    artifact["shape_meta"],
-    compile=True,
-)
-```
-
-The wrapper accepts a tuple of tensors in sorted active-observation-key order.
-Use `active_observation_keys()` from `hommi_train.export` when building an edge
-adapter.
-
-## Dataset and frame cache
-
-Input HDF5 layout (`hommi-dataset >= 0.2.0`):
+Input HDF5 layout (`hommi-dataset >= 0.2`):
 
 ```text
 hz                  float32
@@ -278,7 +424,7 @@ episode_001/
   video_index        int32[N, A]
   video/
     left             uint8[original H.264 MP4 bytes]
-    right            uint8[...]                 # dual arm
+    right            uint8[...]   # dual-arm
 ```
 
 Stored action per arm:
@@ -287,67 +433,81 @@ Stored action per arm:
 [x, y, z, qw, qx, qy, qz, gripper]
 ```
 
-Model action per arm:
+Network action per arm:
 
 ```text
 [relative position(3), rotation6d(6), gripper(1)]
 ```
 
-Default image path:
+Image pipeline:
 
 ```text
 HDF5 H.264
-  -> unique observation-referenced source frames only
+  -> referenced source frames only
   -> decode once
   -> deterministic center-square crop
-  -> resize 224x224
-  -> uint8 CHW RAM cache
-  -> per-sample float32 [0,1]
-  -> DiT train RandomCrop/ColorJitter or eval CenterCrop
+  -> resize to image_size
+  -> uint8 RAM cache
+  -> float [0,1] sample
+  -> encoder RandomCrop/ColorJitter (train)
+     or CenterCrop (eval)
 ```
 
-The train/validation split is decided before RAM preload and only the training
-split is used for normalizer fitting.
+## Programmatic API
 
-## Key defaults
+```python
+from hommi_train import load_task_config, run_training
+
+spec = load_task_config("configs/tasks/pick_place.yaml")
+run_training(
+    spec.resolve_dataset_path(),
+    "runs/pick_place",
+    spec.config,
+)
+```
+
+Encoder configuration comes directly from the policy module:
+
+```python
+from hommi_diffusion_policy import DiTObsEncoderConfig
+from hommi_train import DiTModelConfig
+
+encoder = DiTObsEncoderConfig(
+    train_crop_ratio=0.9,
+    eval_crop_ratio=1.0,
+    color_jitter_brightness=0.2,
+)
+model = DiTModelConfig(encoder=encoder)
+```
+
+## Repository layout
 
 ```text
-obs_horizon                         2
-action_horizon                     16
-image_size                        224
-val_ratio                         0.05
-frame_cache                        ram
+configs/
+├── default.yaml
+└── tasks/
 
-batch_size                          16
-epochs                            1000
-lr                               7.5e-5
-obs_encoder_lr                    7.5e-6
-warmup_steps                         50
-clip_grad_norm                       5
-precision                          bf16
-
-model_name      vit_base_patch16_clip_224.openai
-n_action_steps                       8
-num_inference_steps                 16
-attention_embed_dim                768
-depth                                8
-num_heads                            8
-DDIM train timesteps                50
+src/hommi_train/
+├── configuration/   # task YAML generation/loading
+├── dataset/         # HDF5, geometry, video, frame cache, split
+├── normalization/   # training-split statistics
+├── policy/          # policy factory
+├── runtime/         # accelerator/device/precision resolution
+├── training/        # Trainer, EMA, optimizer, checkpoints
+├── evaluation/      # eager/Inductor/TensorRT evaluation
+├── export/          # portable model + PT2 utilities
+├── config.py
+├── runner.py
+└── cli.py
 ```
 
 ## Tests
 
-The 0.5.0 suite covers dataset geometry/schema/video/cache, normalization,
-splitting, policy composition, training/checkpoint resume, CLI config,
-portable artifact stripping/loading, sampled/full evaluation, and a real
-`torch.export -> save -> load -> execute` PT2 round-trip for an exportable
-inference policy.
-
-## Lock file
-
-Regenerate the lock file in a networked checkout after unpacking:
-
 ```bash
-uv lock
 uv sync --extra dev
+uv run python -m pytest
 ```
+
+## License
+
+See the repository license and third-party notices where applicable.

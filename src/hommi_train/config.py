@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Mapping, TypeVar
 
+from hommi_diffusion_policy import DiTObsEncoderConfig
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetConfig:
@@ -20,7 +22,7 @@ class DatasetConfig:
 
 @dataclass(frozen=True, slots=True)
 class DiTTrainConfig:
-    """HoMMI-aligned training defaults plus explicit runtime optimizations."""
+    """HoMMI-aligned optimization defaults plus runtime-neutral loader settings."""
 
     batch_size: int = 16
     num_workers: int = 8
@@ -36,13 +38,12 @@ class DiTTrainConfig:
     seed: int = 42
     betas: tuple[float, float] = (0.95, 0.999)
 
-    # Runtime optimizations. These do not change the stored model architecture.
-    precision: Literal["fp32", "bf16"] = "bf16"
-    pin_memory: bool = True
+    # ``auto`` is resolved against the selected accelerator at runtime.
+    precision: Literal["auto", "fp32", "bf16"] = "auto"
+    pin_memory: bool | Literal["auto"] = "auto"
     persistent_workers: bool = True
     drop_last: bool = True
 
-    # Checkpoint policy. ``best.pt`` is always maintained when validation runs.
     keep_best_k: int = 3
 
 
@@ -62,10 +63,14 @@ class DDIMConfig:
 
 @dataclass(frozen=True, slots=True)
 class DiTModelConfig:
-    """Defaults mirrored from HoMMI ``diffusion_dit.yaml``."""
+    """Diffusion-policy architecture config.
 
-    model_name: str = "vit_base_patch16_clip_224.openai"
-    pretrained: bool = True
+    Vision-backbone and augmentation settings live in
+    :class:`hommi_diffusion_policy.DiTObsEncoderConfig`, so model behavior has a
+    single source of truth in the reusable policy package.
+    """
+
+    encoder: DiTObsEncoderConfig = field(default_factory=DiTObsEncoderConfig)
     n_action_steps: int = 8
     num_inference_steps: int = 16
     attention_embed_dim: int = 768
@@ -86,6 +91,8 @@ class DiTModelConfig:
 class RuntimeConfig:
     """Machine/runtime choices that are not part of the learned architecture."""
 
+    # ``auto`` uses torch.accelerator.current_accelerator(check_available=True)
+    # and falls back to CPU.
     device: str = "auto"
     video_device: Literal["cpu", "cuda"] = "cpu"
     decoder_cache_size: int = 4
@@ -95,18 +102,14 @@ class RuntimeConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ExportConfig:
-    """Post-training portable artifact policy.
+class TensorRTConfig:
+    """Torch-TensorRT settings for evaluation acceleration."""
 
-    ``model.pt`` is the stable hommi-train deployment artifact. Experimental
-    ``torch.export`` PT2 generation remains an explicit command because its
-    compatibility depends on the PyTorch version and exportability of the full
-    diffusion inference path.
-    """
-
-    auto_export: bool = True
-    source: Literal["best", "last"] = "best"
-    artifact_name: str = "model.pt"
+    min_block_size: int = 5
+    optimization_level: int = 3
+    dynamic: bool = False
+    compile_backbone: bool = True
+    compile_denoiser: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,20 +118,31 @@ class EvaluationConfig:
 
     mode: Literal["sampled", "full"] = "sampled"
     seed: int = 42
-    precision: Literal["fp32", "bf16"] = "bf16"
-    compile: bool = False
+    precision: Literal["auto", "fp32", "bf16"] = "auto"
+    backend: Literal["auto", "eager", "inductor", "tensorrt"] = "auto"
     compile_mode: str = "reduce-overhead"
+    tensorrt: TensorRTConfig = field(default_factory=TensorRTConfig)
+
+
+@dataclass(frozen=True, slots=True)
+class ExportConfig:
+    """Post-training portable artifact policy."""
+
+    auto_export: bool = True
+    source: Literal["best", "last"] = "best"
+    artifact_name: str = "model.pt"
 
 
 @dataclass(frozen=True, slots=True)
 class HommiTrainConfig:
-    """Hierarchical configuration carried into training checkpoints."""
+    """Hierarchical configuration carried into YAML files and checkpoints."""
 
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
     training: DiTTrainConfig = field(default_factory=DiTTrainConfig)
     model: DiTModelConfig = field(default_factory=DiTModelConfig)
     ddim: DDIMConfig = field(default_factory=DDIMConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
 
 
@@ -142,28 +156,110 @@ def _config_kwargs(cls: type[_ConfigT], value: Mapping[str, Any] | None) -> dict
     return {key: item for key, item in value.items() if key in known}
 
 
-def hommi_train_config_from_mapping(value: Mapping[str, Any] | None) -> HommiTrainConfig:
-    """Reconstruct :class:`HommiTrainConfig` from checkpoint-friendly mappings.
+def _encoder_config_from_mapping(value: Mapping[str, Any] | None) -> DiTObsEncoderConfig:
+    if value is None:
+        return DiTObsEncoderConfig()
+    known = {item.name for item in fields(DiTObsEncoderConfig)}
+    return DiTObsEncoderConfig(**{k: v for k, v in value.items() if k in known})
 
-    Missing sections/fields use current defaults so 0.3/0.4 checkpoints remain
-    usable. Unknown fields are ignored to keep this reader tolerant of newer
-    checkpoint metadata.
+
+
+
+def _validate_mapping_fields(
+    name: str,
+    cls: type[Any],
+    value: object,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
+    allowed = {item.name for item in fields(cls)}
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ValueError(f"unknown {name} field(s): {', '.join(unknown)}")
+
+
+def _validate_strict_config_mapping(value: Mapping[str, Any]) -> None:
+    _validate_mapping_fields("config", HommiTrainConfig, value)
+    _validate_mapping_fields("config.dataset", DatasetConfig, value.get("dataset"))
+    _validate_mapping_fields("config.training", DiTTrainConfig, value.get("training"))
+    _validate_mapping_fields("config.ddim", DDIMConfig, value.get("ddim"))
+    _validate_mapping_fields("config.runtime", RuntimeConfig, value.get("runtime"))
+    _validate_mapping_fields("config.export", ExportConfig, value.get("export"))
+
+    raw_model = value.get("model")
+    _validate_mapping_fields("config.model", DiTModelConfig, raw_model)
+    if isinstance(raw_model, Mapping):
+        _validate_mapping_fields(
+            "config.model.encoder",
+            DiTObsEncoderConfig,
+            raw_model.get("encoder"),
+        )
+
+    raw_eval = value.get("evaluation")
+    _validate_mapping_fields("config.evaluation", EvaluationConfig, raw_eval)
+    if isinstance(raw_eval, Mapping):
+        _validate_mapping_fields(
+            "config.evaluation.tensorrt",
+            TensorRTConfig,
+            raw_eval.get("tensorrt"),
+        )
+
+
+def hommi_train_config_from_mapping(
+    value: Mapping[str, Any] | None,
+    *,
+    strict: bool = False,
+) -> HommiTrainConfig:
+    """Reconstruct :class:`HommiTrainConfig` from YAML/checkpoint mappings.
+
+    Older 0.3-0.5 checkpoints are migrated automatically: ``model_name`` and
+    ``pretrained`` used to live directly in ``model`` and are now moved into
+    ``model.encoder``. Missing sections use current defaults. By default unknown
+    fields are ignored for checkpoint forward compatibility; ``strict=True`` is
+    intended for user-authored YAML and rejects misspelled/unknown keys.
     """
     if value is None:
         return HommiTrainConfig()
     if not isinstance(value, Mapping):
         raise TypeError("training config must be a mapping")
+    if strict:
+        _validate_strict_config_mapping(value)
 
     training_kwargs = _config_kwargs(DiTTrainConfig, value.get("training"))
     if "betas" in training_kwargs:
         betas = training_kwargs["betas"]
         training_kwargs["betas"] = (float(betas[0]), float(betas[1]))
 
+    raw_model = value.get("model")
+    if not isinstance(raw_model, Mapping):
+        raw_model = {}
+    raw_encoder = raw_model.get("encoder")
+    if not isinstance(raw_encoder, Mapping):
+        raw_encoder = {}
+    migrated_encoder = dict(raw_encoder)
+    for legacy_name in ("model_name", "pretrained"):
+        if legacy_name in raw_model and legacy_name not in migrated_encoder:
+            migrated_encoder[legacy_name] = raw_model[legacy_name]
+    model_kwargs = _config_kwargs(DiTModelConfig, raw_model)
+    model_kwargs["encoder"] = _encoder_config_from_mapping(migrated_encoder)
+
+    raw_eval = value.get("evaluation")
+    if not isinstance(raw_eval, Mapping):
+        raw_eval = {}
+    eval_kwargs = _config_kwargs(EvaluationConfig, raw_eval)
+    raw_trt = raw_eval.get("tensorrt")
+    eval_kwargs["tensorrt"] = TensorRTConfig(
+        **_config_kwargs(TensorRTConfig, raw_trt if isinstance(raw_trt, Mapping) else None)
+    )
+
     return HommiTrainConfig(
         dataset=DatasetConfig(**_config_kwargs(DatasetConfig, value.get("dataset"))),
         training=DiTTrainConfig(**training_kwargs),
-        model=DiTModelConfig(**_config_kwargs(DiTModelConfig, value.get("model"))),
+        model=DiTModelConfig(**model_kwargs),
         ddim=DDIMConfig(**_config_kwargs(DDIMConfig, value.get("ddim"))),
         runtime=RuntimeConfig(**_config_kwargs(RuntimeConfig, value.get("runtime"))),
+        evaluation=EvaluationConfig(**eval_kwargs),
         export=ExportConfig(**_config_kwargs(ExportConfig, value.get("export"))),
     )

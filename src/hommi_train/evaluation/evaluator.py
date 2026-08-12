@@ -20,6 +20,7 @@ class EvaluationResult:
     num_action_values: int
     device: str
     precision: Literal["fp32", "bf16"]
+    backend: str = "eager"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -49,6 +50,7 @@ def evaluate_policy(
     mode: Literal["sampled", "full"] = "sampled",
     precision: Literal["fp32", "bf16"] = "bf16",
     seed: int = 42,
+    backend: str = "eager",
 ) -> EvaluationResult:
     """Evaluate EMA inference using full-horizon action MSE.
 
@@ -102,6 +104,7 @@ def evaluate_policy(
         num_action_values=total_values,
         device=str(resolved),
         precision=precision,
+        backend=backend,
     )
 
 

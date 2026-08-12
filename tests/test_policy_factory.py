@@ -5,6 +5,8 @@ import types
 
 import hommi_diffusion_policy
 
+from dataclasses import replace
+
 from hommi_train.config import DDIMConfig, DiTModelConfig
 from hommi_train.policy import build_ddim_scheduler, build_dit_policy
 
@@ -16,10 +18,11 @@ class _FakeScheduler:
 
 
 class _FakeEncoder:
-    def __init__(self, shape_meta, *, model_name: str, pretrained: bool):
+    def __init__(self, shape_meta, *, config):
         self.shape_meta = shape_meta
-        self.model_name = model_name
-        self.pretrained = pretrained
+        self.config = config
+        self.model_name = config.model_name
+        self.pretrained = config.pretrained
 
 
 class _FakePolicy:
@@ -95,7 +98,10 @@ def test_dit_policy_factory_can_disable_pretrained_initialization_for_restore(mo
 
     policy = build_dit_policy(
         _shape_meta(),
-        model_config=DiTModelConfig(pretrained=True),
+        model_config=replace(
+            DiTModelConfig(),
+            encoder=replace(DiTModelConfig().encoder, pretrained=True),
+        ),
         pretrained_override=False,
     )
     assert policy.kwargs["obs_encoder"].pretrained is False

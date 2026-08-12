@@ -6,12 +6,15 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from ..config import DiTTrainConfig
+from ..runtime import resolve_device, resolve_pin_memory
 
 
 def build_dataloaders(
     train_dataset: Dataset,
     val_dataset: Dataset,
     config: DiTTrainConfig,
+    *,
+    device: str | torch.device = "auto",
 ) -> tuple[DataLoader, DataLoader]:
     """Construct train/validation DataLoaders from runtime training settings."""
     if config.batch_size < 1:
@@ -19,11 +22,12 @@ def build_dataloaders(
     if config.num_workers < 0:
         raise ValueError("num_workers must be >= 0")
 
+    resolved_device = resolve_device(device)
     persistent_workers = bool(config.persistent_workers and config.num_workers > 0)
     common: dict[str, Any] = {
         "batch_size": config.batch_size,
         "num_workers": config.num_workers,
-        "pin_memory": config.pin_memory,
+        "pin_memory": resolve_pin_memory(config.pin_memory, resolved_device),
         "persistent_workers": persistent_workers,
         "drop_last": config.drop_last,
     }

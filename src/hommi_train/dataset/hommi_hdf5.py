@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import Dataset, get_worker_info
 
 from .geometry import pose7_wxyz_to_matrix, relative_pose9
-from .schema import HommiHDF5Info, inspect_hommi_hdf5
+from .schema import HommiHDF5Info, inspect_hommi_hdf5, make_shape_meta
 from .frame_cache import FrameCacheMode, HDF5VideoFrameCache
 from .video import HDF5VideoDecoderCache
 
@@ -154,43 +154,12 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
 
     @property
     def shape_meta(self) -> dict[str, Any]:
-        obs: dict[str, Any] = {}
-        for arm_idx, _side in enumerate(self.arm_order):
-            obs[f"camera{arm_idx}_main_rgb"] = {
-                "shape": [3, self.image_size, self.image_size],
-                "horizon": self.obs_horizon,
-                "type": "rgb",
-                "ignore_by_policy": False,
-            }
-            obs[f"robot{arm_idx}_eef_pos"] = {
-                "shape": [3],
-                "horizon": self.obs_horizon,
-                "type": "low_dim",
-                "ignore_by_policy": False,
-            }
-            obs[f"robot{arm_idx}_eef_rot_axis_angle"] = {
-                "raw_shape": [3],
-                "shape": [6],
-                "horizon": self.obs_horizon,
-                "type": "low_dim",
-                "rotation_rep": "rotation_6d",
-                "ignore_by_policy": False,
-            }
-            obs[f"robot{arm_idx}_gripper_width"] = {
-                "shape": [1],
-                "horizon": self.obs_horizon,
-                "type": "low_dim",
-                "ignore_by_policy": False,
-            }
-        return {
-            "image_resolution": self.image_size,
-            "obs": obs,
-            "action": {
-                "shape": [self.action_dim],
-                "horizon": self.action_horizon,
-                "rotation_rep": "rotation_6d",
-            },
-        }
+        return make_shape_meta(
+            self.info,
+            obs_horizon=self.obs_horizon,
+            action_horizon=self.action_horizon,
+            image_size=self.image_size,
+        )
 
     def _load_lowdim(self, episode_keys: Sequence[str]) -> tuple[_EpisodeData, ...]:
         episodes: list[_EpisodeData] = []

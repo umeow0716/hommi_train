@@ -158,6 +158,7 @@ def run_training(
             train_dataset,
             val_dataset,
             config.training,
+            device=config.runtime.device,
         )
         trainer = Trainer(
             policy=policy,
@@ -166,7 +167,7 @@ def run_training(
             config=config.training,
             run_config=config,
             output_dir=output_dir,
-            device=None if config.runtime.device == "auto" else config.runtime.device,
+            device=config.runtime.device,
             progress=config.runtime.progress,
         )
         if checkpoint is not None:

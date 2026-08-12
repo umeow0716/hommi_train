@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from ..config import DiTTrainConfig
+from ..runtime import resolve_device, resolve_precision
 from .checkpoint import (
     load_training_checkpoint,
     restore_training_checkpoint,
@@ -61,12 +62,7 @@ def seed_everything(seed: int) -> None:
 
 
 def resolve_training_device(device: str | torch.device | None = None) -> torch.device:
-    if device is None:
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    resolved = torch.device(device)
-    if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA training requested but torch.cuda.is_available() is false")
-    return resolved
+    return resolve_device("auto" if device is None else device)
 
 
 class Trainer:
@@ -99,6 +95,7 @@ class Trainer:
         self.output_dir = Path(output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.device = resolve_training_device(device)
+        self.precision = resolve_precision(config.precision, self.device)
         self.run_config = run_config if run_config is not None else config
         self.progress = bool(progress)
         self.state = TrainerState()
@@ -145,19 +142,11 @@ class Trainer:
             raise ValueError("log_grad_norm_every must be -1 or >= 1")
         if cfg.keep_best_k < 0:
             raise ValueError("keep_best_k must be >= 0")
-        if cfg.precision not in {"fp32", "bf16"}:
+        if cfg.precision not in {"auto", "fp32", "bf16"}:
             raise ValueError(f"unsupported precision: {cfg.precision!r}")
-        if (
-            cfg.precision == "bf16"
-            and self.device.type == "cuda"
-            and not torch.cuda.is_bf16_supported()
-        ):
-            raise RuntimeError(
-                "precision='bf16' requested but this CUDA device does not support BF16"
-            )
 
     def _autocast(self):
-        if self.config.precision == "fp32":
+        if self.precision == "fp32":
             return nullcontext()
         if self.device.type not in {"cpu", "cuda"}:
             raise RuntimeError(
@@ -215,7 +204,9 @@ class Trainer:
     def _checkpoint_payload_extra(self) -> dict[str, Any]:
         return {
             "trainer": "hommi_train.training.Trainer",
-            "precision": self.config.precision,
+            "precision": self.precision,
+            "requested_precision": self.config.precision,
+            "device": str(self.device),
         }
 
     def _save_checkpoint(self, path: Path, metrics: Mapping[str, float]) -> None:

@@ -59,7 +59,7 @@ def build_dit_policy(
     not download or initialize pretrained weights that will immediately be
     overwritten by the saved state dict.
     """
-    from hommi_diffusion_policy import DiTObsEncoderLite, DiffusionDiTImagePolicy
+    from hommi_diffusion_policy import DiTObsEncoderConfig, DiTObsEncoderLite, DiffusionDiTImagePolicy
 
     cfg = model_config or DiTModelConfig()
     action_meta = shape_meta.get("action")
@@ -74,13 +74,19 @@ def build_dit_policy(
         )
 
     obs_horizon = _observation_horizon(shape_meta)
-    obs_encoder = DiTObsEncoderLite(
-        shape_meta,
-        model_name=cfg.model_name,
-        pretrained=(
-            cfg.pretrained if pretrained_override is None else bool(pretrained_override)
-        ),
-    )
+    encoder_cfg = cfg.encoder
+    if pretrained_override is not None:
+        encoder_cfg = DiTObsEncoderConfig(
+            **{
+                field: (
+                    bool(pretrained_override)
+                    if field == "pretrained"
+                    else getattr(encoder_cfg, field)
+                )
+                for field in encoder_cfg.__dataclass_fields__
+            }
+        )
+    obs_encoder = DiTObsEncoderLite(shape_meta, config=encoder_cfg)
     scheduler = build_ddim_scheduler(ddim_config)
     return DiffusionDiTImagePolicy(
         name=name,

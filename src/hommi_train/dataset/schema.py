@@ -62,6 +62,60 @@ def _decode_text_array(values: Iterable[object], *, field: str) -> tuple[str, ..
     return result
 
 
+
+def make_shape_meta(
+    info: HommiHDF5Info,
+    *,
+    obs_horizon: int = 2,
+    action_horizon: int = 16,
+    image_size: int = 224,
+) -> dict[str, object]:
+    """Build the canonical model observation/action contract from HDF5 metadata.
+
+    No video decode or episode payload read is required, which makes this safe
+    for task-YAML generation and configuration validation.
+    """
+    if obs_horizon < 1 or action_horizon < 1 or image_size < 1:
+        raise ValueError("obs_horizon, action_horizon, and image_size must be >= 1")
+
+    obs: dict[str, object] = {}
+    for arm_idx, _side in enumerate(info.arm_order):
+        obs[f"camera{arm_idx}_main_rgb"] = {
+            "shape": [3, image_size, image_size],
+            "horizon": obs_horizon,
+            "type": "rgb",
+            "ignore_by_policy": False,
+        }
+        obs[f"robot{arm_idx}_eef_pos"] = {
+            "shape": [3],
+            "horizon": obs_horizon,
+            "type": "low_dim",
+            "ignore_by_policy": False,
+        }
+        obs[f"robot{arm_idx}_eef_rot_axis_angle"] = {
+            "raw_shape": [3],
+            "shape": [6],
+            "horizon": obs_horizon,
+            "type": "low_dim",
+            "rotation_rep": "rotation_6d",
+            "ignore_by_policy": False,
+        }
+        obs[f"robot{arm_idx}_gripper_width"] = {
+            "shape": [1],
+            "horizon": obs_horizon,
+            "type": "low_dim",
+            "ignore_by_policy": False,
+        }
+    return {
+        "image_resolution": image_size,
+        "obs": obs,
+        "action": {
+            "shape": [info.num_arms * 10],
+            "horizon": action_horizon,
+            "rotation_rep": "rotation_6d",
+        },
+    }
+
 def inspect_hommi_hdf5(path: str | Path, *, strict_video_attrs: bool = True) -> HommiHDF5Info:
     """Validate the on-disk ``hommi_dataset>=0.2`` HDF5 schema.
 

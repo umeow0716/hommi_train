@@ -16,7 +16,11 @@ def test_cli_defaults_come_from_config_dataclasses() -> None:
 def test_cli_applies_only_explicit_overrides() -> None:
     base = HommiTrainConfig(
         training=replace(HommiTrainConfig().training, batch_size=32, epochs=777),
-        model=replace(HommiTrainConfig().model, depth=12, pretrained=True),
+        model=replace(
+            HommiTrainConfig().model,
+            depth=12,
+            encoder=replace(HommiTrainConfig().model.encoder, pretrained=True),
+        ),
         runtime=replace(HommiTrainConfig().runtime, device="cuda:1"),
     )
     args = build_parser().parse_args(
@@ -34,7 +38,7 @@ def test_cli_applies_only_explicit_overrides() -> None:
     assert cfg.training.batch_size == 32
     assert cfg.training.epochs == 1200
     assert cfg.model.depth == 12
-    assert cfg.model.pretrained is False
+    assert cfg.model.encoder.pretrained is False
     assert cfg.runtime.device == "cuda"
 
 
