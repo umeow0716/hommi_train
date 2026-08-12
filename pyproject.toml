@@ -1,6 +1,6 @@
 [project]
 name = "hommi-train"
-version = "0.4.0"
+version = "0.5.0"
 description = "Training pipeline for HoMMI diffusion policies and hommi-dataset HDF5 files"
 readme = "README.md"
 authors = [

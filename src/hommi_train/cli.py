@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .config import (
-    HommiTrainConfig,
-    hommi_train_config_from_mapping,
-)
+from .config import HommiTrainConfig, hommi_train_config_from_mapping
 from .dataset import inspect_hommi_hdf5
 from .training import load_training_checkpoint
+
+VERSION = "0.5.0"
 
 
 def _add_bool(group: argparse._ArgumentGroup, *names: str, **kwargs: Any) -> None:
@@ -18,10 +19,15 @@ def _add_bool(group: argparse._ArgumentGroup, *names: str, **kwargs: Any) -> Non
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build the backwards-compatible default training parser."""
     defaults = HommiTrainConfig()
     parser = argparse.ArgumentParser(
         prog="hommi-train",
-        description="Train HoMMI diffusion policies from hommi-dataset HDF5 files.",
+        description=(
+            "Train HoMMI diffusion policies from hommi-dataset HDF5 files. "
+            "Use `hommi-train eval --help` or `hommi-train export --help` for "
+            "the 0.5 evaluation/deployment commands."
+        ),
         argument_default=argparse.SUPPRESS,
     )
     parser.add_argument("-i", "--input", type=Path, required=True, help="HoMMI HDF5 dataset")
@@ -37,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate HDF5 schema and print metadata without training",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.4.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
 
     d = defaults.dataset
     group = parser.add_argument_group("Dataset options")
@@ -113,6 +119,49 @@ def build_parser() -> argparse.ArgumentParser:
     group = parser.add_argument_group("Checkpoint options")
     group.add_argument("--resume", type=Path, help="resume a training checkpoint; its saved config is the base for unspecified options")
     group.add_argument("--keep-best-k", type=int, help=f"retain best K metric checkpoints (default: {t.keep_best_k})")
+
+    e = defaults.export
+    group = parser.add_argument_group("Post-training export options")
+    _add_bool(group, "--auto-export", help=f"write portable EMA model after training (default: {e.auto_export})")
+    group.add_argument("--export-source", choices=("best", "last"), help=f"checkpoint used for model.pt (default: {e.source})")
+    group.add_argument("--artifact-name", help=f"portable model filename (default: {e.artifact_name})")
+    return parser
+
+
+def build_eval_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hommi-train eval",
+        description="Evaluate a portable EMA model on its saved validation split.",
+    )
+    parser.add_argument("-i", "--input", type=Path, required=True, help="HoMMI HDF5 dataset")
+    parser.add_argument("-m", "--model", type=Path, required=True, help="portable model.pt")
+    parser.add_argument("--mode", choices=("sampled", "full"), default="sampled")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--precision", choices=("fp32", "bf16"))
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--frame-cache", choices=("none", "lru", "ram"))
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--compile-mode", default="reduce-overhead")
+    parser.add_argument("-o", "--output", type=Path, help="optional evaluation JSON output")
+    return parser
+
+
+def build_export_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="hommi-train export",
+        description=(
+            "Strip a training checkpoint to portable EMA model.pt and optionally "
+            "attempt an experimental torch.export PT2 artifact."
+        ),
+    )
+    parser.add_argument("-c", "--checkpoint", type=Path, required=True)
+    parser.add_argument("-o", "--output", type=Path, help="portable model.pt path")
+    parser.add_argument("--pt2", type=Path, help="also attempt torch.export and save this .pt2 path")
+    parser.add_argument("--device", default="cpu", help="device used for optional PT2 tracing")
+    parser.add_argument("--batch-size", type=int, default=1, help="static PT2 export batch size")
+    parser.add_argument("--strict-export", action=argparse.BooleanOptionalAction, default=False)
     return parser
 
 
@@ -120,11 +169,7 @@ def _value(args: argparse.Namespace, name: str, current: Any) -> Any:
     return getattr(args, name, current)
 
 
-def config_from_args(
-    args: argparse.Namespace,
-    *,
-    base: HommiTrainConfig | None = None,
-) -> HommiTrainConfig:
+def config_from_args(args: argparse.Namespace, *, base: HommiTrainConfig | None = None) -> HommiTrainConfig:
     """Apply only explicitly supplied CLI values over defaults/checkpoint config."""
     cfg = base or HommiTrainConfig()
     d = cfg.dataset
@@ -141,10 +186,7 @@ def config_from_args(
     )
 
     t = cfg.training
-    betas = (
-        float(_value(args, "beta1", t.betas[0])),
-        float(_value(args, "beta2", t.betas[1])),
-    )
+    betas = (float(_value(args, "beta1", t.betas[0])), float(_value(args, "beta2", t.betas[1])))
     training = replace(
         t,
         batch_size=_value(args, "batch_size", t.batch_size),
@@ -211,12 +253,21 @@ def config_from_args(
         video_num_threads=_value(args, "video_num_threads", r.video_num_threads),
         progress=_value(args, "progress", r.progress),
     )
+
+    e = cfg.export
+    export = replace(
+        e,
+        auto_export=_value(args, "auto_export", e.auto_export),
+        source=_value(args, "export_source", e.source),
+        artifact_name=_value(args, "artifact_name", e.artifact_name),
+    )
     return HommiTrainConfig(
         dataset=dataset,
         training=training,
         model=model,
         ddim=ddim,
         runtime=runtime,
+        export=export,
     )
 
 
@@ -230,7 +281,7 @@ def _print_dataset_info(path: Path) -> None:
     print(f"samples: {info.num_samples}")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main_train(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "inspect_dataset", False):
@@ -255,3 +306,53 @@ def main(argv: list[str] | None = None) -> int:
         resume_checkpoint=checkpoint,
     )
     return 0
+
+
+def _main_eval(argv: list[str]) -> int:
+    parser = build_eval_parser()
+    args = parser.parse_args(argv)
+    from .evaluation import run_evaluation
+
+    result = run_evaluation(
+        args.input,
+        args.model,
+        mode=args.mode,
+        device=args.device,
+        precision=args.precision,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        frame_cache=args.frame_cache,
+        seed=args.seed,
+        compile=args.compile,
+        compile_mode=args.compile_mode,
+        output_path=args.output,
+    )
+    print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def _main_export(argv: list[str]) -> int:
+    parser = build_export_parser()
+    args = parser.parse_args(argv)
+    from .export import run_export
+
+    result = run_export(
+        args.checkpoint,
+        output_path=args.output,
+        pt2_path=args.pt2,
+        device=args.device,
+        batch_size=args.batch_size,
+        strict_export=args.strict_export,
+    )
+    for kind, path in result.items():
+        print(f"{kind}: {path}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "eval":
+        return _main_eval(args[1:])
+    if args and args[0] == "export":
+        return _main_export(args[1:])
+    return _main_train(args)

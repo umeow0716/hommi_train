@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal, Mapping, TypeVar
 
 
@@ -20,13 +20,7 @@ class DatasetConfig:
 
 @dataclass(frozen=True, slots=True)
 class DiTTrainConfig:
-    """HoMMI-aligned training defaults plus explicit runtime optimizations.
-
-    Model/training hyperparameters mirror ``umi_policy_dit.yaml``. ``bf16``,
-    pinned host memory, and persistent DataLoader workers are runtime choices
-    for modern NVIDIA training and are intentionally documented separately from
-    the HoMMI reference recipe.
-    """
+    """HoMMI-aligned training defaults plus explicit runtime optimizations."""
 
     batch_size: int = 16
     num_workers: int = 8
@@ -48,8 +42,7 @@ class DiTTrainConfig:
     persistent_workers: bool = True
     drop_last: bool = True
 
-    # Checkpoint policy. ``best.pt`` is always maintained when validation runs;
-    # these metric snapshots retain the best K historical validation epochs.
+    # Checkpoint policy. ``best.pt`` is always maintained when validation runs.
     keep_best_k: int = 3
 
 
@@ -93,15 +86,38 @@ class DiTModelConfig:
 class RuntimeConfig:
     """Machine/runtime choices that are not part of the learned architecture."""
 
-    # ``auto`` resolves to CUDA when available and CPU otherwise.
     device: str = "auto"
-    # Video decode stays on CPU by default so DataLoader workers can be used.
-    # With frame_cache="ram", CUDA can also be used for one-time preload.
     video_device: Literal["cpu", "cuda"] = "cpu"
     decoder_cache_size: int = 4
     video_seek_mode: Literal["exact", "approximate"] = "exact"
     video_num_threads: int = 1
     progress: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class ExportConfig:
+    """Post-training portable artifact policy.
+
+    ``model.pt`` is the stable hommi-train deployment artifact. Experimental
+    ``torch.export`` PT2 generation remains an explicit command because its
+    compatibility depends on the PyTorch version and exportability of the full
+    diffusion inference path.
+    """
+
+    auto_export: bool = True
+    source: Literal["best", "last"] = "best"
+    artifact_name: str = "model.pt"
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationConfig:
+    """Standalone evaluation defaults."""
+
+    mode: Literal["sampled", "full"] = "sampled"
+    seed: int = 42
+    precision: Literal["fp32", "bf16"] = "bf16"
+    compile: bool = False
+    compile_mode: str = "reduce-overhead"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +129,7 @@ class HommiTrainConfig:
     model: DiTModelConfig = field(default_factory=DiTModelConfig)
     ddim: DDIMConfig = field(default_factory=DDIMConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    export: ExportConfig = field(default_factory=ExportConfig)
 
 
 _ConfigT = TypeVar("_ConfigT")
@@ -128,9 +145,9 @@ def _config_kwargs(cls: type[_ConfigT], value: Mapping[str, Any] | None) -> dict
 def hommi_train_config_from_mapping(value: Mapping[str, Any] | None) -> HommiTrainConfig:
     """Reconstruct :class:`HommiTrainConfig` from checkpoint-friendly mappings.
 
-    Missing sections/fields use current defaults so 0.3.x checkpoints (which
-    predate ``RuntimeConfig``) remain resumable by the 0.4 CLI. Unknown fields
-    are ignored to keep this reader tolerant of newer checkpoint metadata.
+    Missing sections/fields use current defaults so 0.3/0.4 checkpoints remain
+    usable. Unknown fields are ignored to keep this reader tolerant of newer
+    checkpoint metadata.
     """
     if value is None:
         return HommiTrainConfig()
@@ -148,4 +165,5 @@ def hommi_train_config_from_mapping(value: Mapping[str, Any] | None) -> HommiTra
         model=DiTModelConfig(**_config_kwargs(DiTModelConfig, value.get("model"))),
         ddim=DDIMConfig(**_config_kwargs(DDIMConfig, value.get("ddim"))),
         runtime=RuntimeConfig(**_config_kwargs(RuntimeConfig, value.get("runtime"))),
+        export=ExportConfig(**_config_kwargs(ExportConfig, value.get("export"))),
     )

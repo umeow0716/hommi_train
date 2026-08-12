@@ -1,61 +1,273 @@
 # hommi-train
 
-Training-side package for datasets produced by `hommi-dataset` and policies from
-`hommi-diffusion-policy`.
+Training, evaluation, and deployment tooling for datasets produced by
+`hommi-dataset` and policies from `hommi-diffusion-policy`.
 
-Version **0.4.0** completes the command-line training runner. The reusable
-composition and training layers from 0.2/0.3 are now connected end-to-end, so a
-HoMMI HDF5 dataset can be trained directly with:
+Version **0.5.0** completes the original repository roadmap:
 
-```bash
-python -m hommi_train -i dataset.hdf5 -o outputs/run-001
+```text
+HDF5 dataset
+  -> episode split
+  -> compact uint8 frame cache
+  -> training-only normalizer fitting
+  -> HoMMI DiT policy
+  -> BF16 Trainer / EMA / checkpoints
+  -> portable EMA model.pt
+  -> sampled/full evaluation
+  -> optional torch.compile / torch.export inference paths
 ```
 
-The installed console entry point is equivalent:
+## Repository layout
+
+```text
+src/hommi_train/
+├── dataset/
+│   ├── geometry.py
+│   ├── schema.py
+│   ├── split.py
+│   ├── video.py
+│   ├── frame_cache.py
+│   └── hommi_hdf5.py
+├── normalization/
+│   └── hommi.py
+├── policy/
+│   └── dit.py
+├── training/
+│   ├── data.py
+│   ├── optimizer.py
+│   ├── ema.py
+│   ├── metrics.py
+│   ├── checkpoint.py
+│   └── trainer.py
+├── evaluation/
+│   ├── evaluator.py
+│   └── runner.py
+├── export/
+│   ├── artifact.py
+│   ├── torch_export.py
+│   └── runner.py
+├── runner.py
+├── config.py
+├── cli.py
+└── __main__.py
+```
+
+`hommi-diffusion-policy` remains the reusable model/runtime library.
+`hommi-train` owns HDF5 layout, train/val split, normalization statistics,
+training recipes, evaluation, and deployment artifact composition.
+
+## Train
+
+The original one-command interface remains unchanged:
+
+```bash
+python -m hommi_train \
+    -i dataset.hdf5 \
+    -o outputs/run-001
+```
+
+or:
 
 ```bash
 hommi-train -i dataset.hdf5 -o outputs/run-001
 ```
 
-## Package boundary
+The default configuration follows the HoMMI DiT recipe while runtime choices
+such as BF16, pinned memory, persistent workers, and the uint8 RAM frame cache
+remain explicitly separate optimizations.
 
-`hommi-train` owns dataset/training-recipe knowledge. `hommi-diffusion-policy`
-remains the reusable model/runtime package and does not know how HDF5 episodes
-are stored or how training statistics are fitted.
+Typical overrides:
 
-```text
-hommi_train/
-├── dataset/
-│   ├── geometry.py       # WXYZ pose -> matrix -> UMI rotation-6D
-│   ├── schema.py         # HDF5 schema validation / metadata
-│   ├── split.py          # deterministic episode-level train/val split
-│   ├── video.py          # HDF5/TorchCodec decoder + deterministic resize
-│   ├── frame_cache.py    # none/LRU/full-RAM uint8 working-set cache
-│   └── hommi_hdf5.py     # torch.utils.data.Dataset
-├── normalization/
-│   └── hommi.py          # fit policy normalizer from training split only
-├── policy/
-│   └── dit.py            # DDIM + DiT construction recipe
-├── training/
-│   ├── data.py           # DataLoaders + non-blocking device transfer
-│   ├── optimizer.py      # policy optimizer groups + cosine scheduler
-│   ├── ema.py            # HoMMI EMA warmup
-│   ├── metrics.py        # gradient norm + action MSE
-│   ├── checkpoint.py     # atomic save/load + RNG state
-│   └── trainer.py        # BF16 train/validation loop + resume
-├── runner.py             # dataset -> split -> normalizer -> policy -> Trainer
-├── config.py             # one source of HoMMI-aligned defaults
-├── cli.py                # argparse only; no training business logic
-└── __main__.py
-
-# next milestone
-hommi_train/evaluation/
-hommi_train/export/
+```bash
+python -m hommi_train \
+    -i dataset.hdf5 \
+    -o outputs/run-001 \
+    --batch-size 32 \
+    --lr 1e-4 \
+    --epochs 1200
 ```
 
-## Input HDF5
+Resume restores model, EMA, optimizer, scheduler, RNG streams, progress, and the
+original episode split:
 
-The reader targets `hommi-dataset >= 0.2.0`:
+```bash
+python -m hommi_train \
+    -i dataset.hdf5 \
+    -o outputs/run-001 \
+    --resume outputs/run-001/checkpoints/last.pt
+```
+
+When reconstructing a resume checkpoint, pretrained timm initialization is
+skipped because the checkpoint already contains the complete vision-backbone
+state.
+
+## Output
+
+By default a completed run contains:
+
+```text
+outputs/run-001/
+├── checkpoints/
+│   ├── last.pt
+│   ├── best.pt
+│   └── epoch=XXXX-val_action_mse_error=....pt
+└── model.pt
+```
+
+`checkpoints/*.pt` are **training checkpoints** and contain optimizer/scheduler,
+RNG, and trainer state.
+
+`model.pt` is the **portable inference artifact**. It contains only the EMA
+policy state plus the information required to reconstruct it:
+
+```text
+policy_state           EMA state_dict, including normalizer
+shape_meta             observation/action contract
+config                  model + DDIM + dataset/runtime metadata
+val_episode_keys        reproducible validation split
+metrics                 checkpoint metrics
+provenance              epoch/global step/source checkpoint
+```
+
+It intentionally excludes optimizer, LR scheduler, training RNG state, and the
+non-EMA training model.
+
+The artifact is loaded through PyTorch's restricted `weights_only=True` loader.
+
+### Post-training export controls
+
+Portable EMA export is enabled by default and uses `best.pt` when available:
+
+```text
+--auto-export / --no-auto-export
+--export-source best|last
+--artifact-name model.pt
+```
+
+## Explicit export
+
+A checkpoint can be stripped independently of training:
+
+```bash
+python -m hommi_train export \
+    -c outputs/run-001/checkpoints/best.pt \
+    -o outputs/run-001/model.pt
+```
+
+If `-o` is omitted and the checkpoint lives under `checkpoints/`, the default is
+`../model.pt`.
+
+### Experimental torch.export PT2
+
+`model.pt` is the primary artifact. A static-batch `torch.export` artifact can be
+attempted explicitly:
+
+```bash
+python -m hommi_train export \
+    -c outputs/run-001/checkpoints/best.pt \
+    -o outputs/run-001/model.pt \
+    --pt2 outputs/run-001/model.pt2 \
+    --device cuda \
+    --batch-size 1
+```
+
+The PT2 wrapper exposes active observations as a positional tensor tuple in a
+stable, metadata-recorded key order and returns the executable action chunk.
+The `.pt2` archive embeds `hommi_metadata.json` with `obs_keys`, `shape_meta`,
+and the static export batch size.
+
+Full diffusion inference has to be exportable as one graph. If PT2 generation
+fails, the command reports the exporter error while keeping the already-created
+portable `model.pt`; it never silently creates a partial artifact.
+
+## Evaluation
+
+Evaluate the exact validation split saved in `model.pt`:
+
+```bash
+python -m hommi_train eval \
+    -i dataset.hdf5 \
+    -m outputs/run-001/model.pt
+```
+
+The default `sampled` mode consumes one validation batch to preserve the
+historical HoMMI workspace metric behavior.
+
+Full validation:
+
+```bash
+python -m hommi_train eval \
+    -i dataset.hdf5 \
+    -m outputs/run-001/model.pt \
+    --mode full \
+    -o outputs/run-001/evaluation.json
+```
+
+`full` evaluation uses `drop_last=False` and aggregates squared error by action
+element, so the incomplete final batch is weighted correctly.
+
+The result contains:
+
+```json
+{
+  "mode": "full",
+  "action_mse": 0.0,
+  "num_batches": 0,
+  "num_samples": 0,
+  "num_action_values": 0,
+  "device": "cuda",
+  "precision": "bf16"
+}
+```
+
+The numerical values above are only a schema example.
+
+Diffusion evaluation uses a local forked RNG stream and a fixed seed, so running
+evaluation does not perturb the caller's global Torch RNG state.
+
+### CUDA runtime compilation
+
+Portable `model.pt` remains ordinary PyTorch and can use runtime compilation:
+
+```bash
+python -m hommi_train eval \
+    -i dataset.hdf5 \
+    -m outputs/run-001/model.pt \
+    --device cuda \
+    --compile \
+    --compile-mode reduce-overhead
+```
+
+Programmatic edge inference can use `build_inference_module(..., compile=True)`
+to wrap the dictionary policy API behind a tensor-only module.
+
+## Programmatic inference
+
+```python
+from hommi_train import (
+    build_inference_module,
+    load_portable_policy,
+)
+
+policy, artifact = load_portable_policy(
+    "outputs/run-001/model.pt",
+    device="cuda",
+)
+
+module = build_inference_module(
+    policy,
+    artifact["shape_meta"],
+    compile=True,
+)
+```
+
+The wrapper accepts a tuple of tensors in sorted active-observation-key order.
+Use `active_observation_keys()` from `hommi_train.export` when building an edge
+adapter.
+
+## Dataset and frame cache
+
+Input HDF5 layout (`hommi-dataset >= 0.2.0`):
 
 ```text
 hz                  float32
@@ -69,224 +281,67 @@ episode_001/
     right            uint8[...]                 # dual arm
 ```
 
-Each stored arm action is:
+Stored action per arm:
 
 ```text
 [x, y, z, qw, qx, qy, qz, gripper]
 ```
 
-`HommiHDF5Dataset` converts this to HoMMI's model representation per arm:
+Model action per arm:
 
 ```text
-[pos(3), rotation6d(6), gripper(1)]
+[relative position(3), rotation6d(6), gripper(1)]
 ```
 
-The pose at the last observation timestep is the reference frame. Observation
-history and future action chunks are expressed relative to that pose.
-
-## Training from the CLI
-
-The zero-override command uses the HoMMI-aligned model/training defaults and the
-runtime optimizations documented below:
-
-```bash
-python -m hommi_train \
-    -i pick_and_place.hdf5 \
-    -o outputs/pick-and-place
-```
-
-Typical overrides stay compact:
-
-```bash
-python -m hommi_train \
-    -i pick_and_place.hdf5 \
-    -o outputs/pick-and-place \
-    --batch-size 32 \
-    --lr 1e-4 \
-    --epochs 1200
-```
-
-Use `--help` to see grouped Dataset, Training, Optimizer, DiT/diffusion,
-Runtime, and Checkpoint options.
-
-### Dataset inspection
-
-Schema/metadata inspection does not initialize TorchCodec or the model:
-
-```bash
-python -m hommi_train -i pick_and_place.hdf5 --inspect-dataset
-```
-
-### Resume
-
-Resume restores model, EMA, optimizer, LR scheduler, trainer progress, split,
-and RNG states:
-
-```bash
-python -m hommi_train \
-    -i pick_and_place.hdf5 \
-    -o outputs/pick-and-place \
-    --resume outputs/pick-and-place/checkpoints/last.pt
-```
-
-The checkpoint's saved hierarchical config is the base config for resume. Only
-options explicitly supplied on the new command line override it. This makes it
-possible to extend a run without repeating custom architecture settings:
-
-```bash
-python -m hommi_train \
-    -i pick_and_place.hdf5 \
-    -o outputs/pick-and-place \
-    --resume outputs/pick-and-place/checkpoints/last.pt \
-    --epochs 1500
-```
-
-The original train/validation episode keys are always reused on resume. The CLI
-also checks the saved `shape_meta` against the selected dataset/config before
-restoring weights.
-
-Starting a new run in an output directory that already contains
-`checkpoints/last.pt` is refused unless `--resume` is supplied.
-
-## CLI groups and defaults
-
-### Dataset
+Default image path:
 
 ```text
-obs horizon                   2
-action horizon               16
-image size                  224
-validation ratio           0.05
-action padding              true
-frame cache                  ram
-LRU capacity                2048
-RAM preload decode batch       8
+HDF5 H.264
+  -> unique observation-referenced source frames only
+  -> decode once
+  -> deterministic center-square crop
+  -> resize 224x224
+  -> uint8 CHW RAM cache
+  -> per-sample float32 [0,1]
+  -> DiT train RandomCrop/ColorJitter or eval CenterCrop
 ```
 
-### Training / optimizer
+The train/validation split is decided before RAM preload and only the training
+split is used for normalizer fitting.
+
+## Key defaults
 
 ```text
-batch size                    16
-epochs                      1000
-lr                         7.5e-5
-vision-backbone lr          7.5e-6
-weight decay                 1e-6
-vision weight decay          1e-6
-AdamW betas           (0.95, 0.999)
-warmup steps                    50
-gradient clip                  5.0
-sample/eval every               10 epochs
-grad norm log every             50 steps
-seed                            42
+obs_horizon                         2
+action_horizon                     16
+image_size                        224
+val_ratio                         0.05
+frame_cache                        ram
+
+batch_size                          16
+epochs                            1000
+lr                               7.5e-5
+obs_encoder_lr                    7.5e-6
+warmup_steps                         50
+clip_grad_norm                       5
+precision                          bf16
+
+model_name      vit_base_patch16_clip_224.openai
+n_action_steps                       8
+num_inference_steps                 16
+attention_embed_dim                768
+depth                                8
+num_heads                            8
+DDIM train timesteps                50
 ```
 
-### DiT / DDIM
+## Tests
 
-```text
-vision backbone    vit_base_patch16_clip_224.openai
-pretrained                                      true
-n_action_steps                                     8
-DDIM inference steps                              16
-DiT hidden width                                 768
-timestep embed                                   256
-depth                                               8
-heads                                               8
-MLP ratio                                         4.0
-train diffusion samples                            8
-DDIM train timesteps                              50
-beta schedule                    squaredcos_cap_v2
-prediction type                              epsilon
-```
-
-### Runtime
-
-```text
-training device                 auto  # CUDA if available
-video decode device             cpu
-precision                       bf16
-DataLoader workers                 8
-pin_memory                      true
-persistent_workers              true
-drop_last                       true
-frame cache                      ram / uint8
-```
-
-Runtime choices are intentionally separate from HoMMI architecture/training
-hyperparameters. BF16 is the default CUDA training optimization; use
-`--precision fp32` when required.
-
-## Video path and RAM working set
-
-H.264 remains the compact on-disk representation. The default training working
-set is compact decoded host RAM:
-
-```text
-HDF5 embedded H.264 (original 1920x1440)
-    -> only unique frames referenced by selected episodes/observations
-    -> TorchCodec decode
-    -> deterministic center-square crop
-    -> resize to 224x224
-    -> uint8 CHW RAM cache
-```
-
-The train/validation split is decided **before** either dataset is constructed,
-so each RAM cache only preloads its own episode set. Validation data is never
-used to fit normalizer statistics.
-
-The dataset center-square crop is deterministic preprocessing. The DiT
-encoder's 0.95 RandomCrop/CenterCrop and train ColorJitter remain model-side
-augmentation.
-
-## Programmatic composition
-
-The CLI is only a frontend. The same complete composition is available without
-argparse:
-
-```python
-from hommi_train import HommiTrainConfig, run_training
-
-state = run_training(
-    "dataset.hdf5",
-    "outputs/run-001",
-    HommiTrainConfig(),
-)
-```
-
-Lower layers remain separately reusable when custom composition is needed.
-
-## Validation behavior
-
-To preserve the previous HoMMI workspace behavior, every `sample_every` epochs
-the EMA policy evaluates the last train batch and one validation batch using
-full-horizon action MSE.
-
-The next milestone will separate this into explicit sampled/full evaluation and
-produce portable/optimized inference artifacts.
-
-## Checkpoints
-
-Training writes:
-
-```text
-output/
-└── checkpoints/
-    ├── last.pt
-    ├── best.pt
-    └── epoch=XXXX-val_action_mse_error=....pt   # best K, default 3
-```
-
-Each checkpoint includes model/EMA/optimizer/scheduler state, next epoch,
-global step, full config, `shape_meta`, train/validation episode keys, metrics,
-and Python/NumPy/Torch CPU/CUDA RNG states.
-
-## Next milestone
-
-**0.5.0** adds explicit evaluation/export functionality:
-
-- sampled versus full validation/evaluation;
-- portable EMA `model.pt` without optimizer/training state;
-- investigation of `torch.export` for the full diffusion policy;
-- an optimized CUDA edge-inference artifact when technically appropriate.
+The 0.5.0 suite covers dataset geometry/schema/video/cache, normalization,
+splitting, policy composition, training/checkpoint resume, CLI config,
+portable artifact stripping/loading, sampled/full evaluation, and a real
+`torch.export -> save -> load -> execute` PT2 round-trip for an exportable
+inference policy.
 
 ## Lock file
 

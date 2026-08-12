@@ -49,11 +49,15 @@ def build_dit_policy(
     model_config: DiTModelConfig | None = None,
     ddim_config: DDIMConfig | None = None,
     name: str = "diffusion_dit",
+    pretrained_override: bool | None = None,
 ):
     """Construct the HoMMI 2D DiT policy from canonical dataset metadata.
 
     ``hommi_train`` owns this construction recipe; the actual encoder and policy
-    implementations remain in ``hommi_diffusion_policy``.
+    implementations remain in ``hommi_diffusion_policy``. ``pretrained_override``
+    is used when reconstructing a fully saved checkpoint/artifact so timm does
+    not download or initialize pretrained weights that will immediately be
+    overwritten by the saved state dict.
     """
     from hommi_diffusion_policy import DiTObsEncoderLite, DiffusionDiTImagePolicy
 
@@ -73,7 +77,9 @@ def build_dit_policy(
     obs_encoder = DiTObsEncoderLite(
         shape_meta,
         model_name=cfg.model_name,
-        pretrained=cfg.pretrained,
+        pretrained=(
+            cfg.pretrained if pretrained_override is None else bool(pretrained_override)
+        ),
     )
     scheduler = build_ddim_scheduler(ddim_config)
     return DiffusionDiTImagePolicy(

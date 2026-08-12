@@ -84,3 +84,18 @@ def test_dit_policy_factory_wires_shape_meta_and_defaults(monkeypatch) -> None:
     assert kwargs["use_rms_norm"] is True
     assert isinstance(kwargs["noise_scheduler"], _FakeScheduler)
     assert kwargs["obs_encoder"].model_name == "vit_base_patch16_clip_224.openai"
+
+
+def test_dit_policy_factory_can_disable_pretrained_initialization_for_restore(monkeypatch) -> None:
+    module = types.ModuleType("diffusers")
+    module.DDIMScheduler = _FakeScheduler
+    monkeypatch.setitem(sys.modules, "diffusers", module)
+    monkeypatch.setattr(hommi_diffusion_policy, "DiTObsEncoderLite", _FakeEncoder)
+    monkeypatch.setattr(hommi_diffusion_policy, "DiffusionDiTImagePolicy", _FakePolicy)
+
+    policy = build_dit_policy(
+        _shape_meta(),
+        model_config=DiTModelConfig(pretrained=True),
+        pretrained_override=False,
+    )
+    assert policy.kwargs["obs_encoder"].pretrained is False

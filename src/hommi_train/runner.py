@@ -6,6 +6,7 @@ from typing import Any, Mapping
 from .config import HommiTrainConfig
 from .dataset import EpisodeSplit, HommiHDF5Dataset, inspect_hommi_hdf5, split_episode_keys
 from .normalization import build_hommi_normalizer
+from .export import save_portable_checkpoint_model
 from .policy import build_dit_policy
 from .training import (
     Trainer,
@@ -147,6 +148,9 @@ def run_training(
             train_dataset.shape_meta,
             model_config=config.model,
             ddim_config=config.ddim,
+            # A resume checkpoint already contains every vision-backbone weight.
+            # Avoid a redundant timm pretrained-weight initialization/download.
+            pretrained_override=False if checkpoint is not None else None,
         )
         policy.set_normalizer(normalizer)
 
@@ -167,7 +171,25 @@ def run_training(
         )
         if checkpoint is not None:
             trainer.restore_checkpoint(checkpoint)
-        return trainer.fit()
+        state = trainer.fit()
+
+        if config.export.auto_export:
+            checkpoint_dir = output_dir / "checkpoints"
+            preferred = (
+                checkpoint_dir / "best.pt"
+                if config.export.source == "best"
+                else checkpoint_dir / "last.pt"
+            )
+            source = preferred if preferred.exists() else checkpoint_dir / "last.pt"
+            if not source.exists():
+                raise FileNotFoundError(
+                    f"cannot create portable model because {source} does not exist"
+                )
+            save_portable_checkpoint_model(
+                source,
+                output_dir / config.export.artifact_name,
+            )
+        return state
     finally:
         if train_dataset is not None:
             train_dataset.close()

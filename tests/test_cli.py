@@ -81,3 +81,20 @@ def test_cli_boolean_optional_flags() -> None:
     assert cfg.training.persistent_workers is False
     assert cfg.training.drop_last is False
     assert cfg.runtime.progress is False
+
+
+def test_checkpoint_config_mapping_accepts_04_without_export() -> None:
+    raw = asdict(HommiTrainConfig())
+    raw.pop("export")
+    restored = hommi_train_config_from_mapping(raw)
+    assert restored.export == HommiTrainConfig().export
+
+
+def test_cli_export_overrides() -> None:
+    args = build_parser().parse_args(
+        ["-i", "dataset.hdf5", "--no-auto-export", "--export-source", "last", "--artifact-name", "ema.pt"]
+    )
+    cfg = config_from_args(args)
+    assert cfg.export.auto_export is False
+    assert cfg.export.source == "last"
+    assert cfg.export.artifact_name == "ema.pt"
