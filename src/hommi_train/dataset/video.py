@@ -140,11 +140,12 @@ class HDF5VideoDecoderCache:
 
 
 def preprocess_rgb_uint8(frames: torch.Tensor, *, image_size: int) -> torch.Tensor:
-    """Deterministically prepare decoded RGB for the host-RAM working set.
+    """Deterministically prepare decoded RGB using HoMMI's image geometry.
 
-    The original video is center-square cropped and resized to ``image_size``.
-    The returned representation stays ``uint8 [N,3,H,W]`` so a full training
-    cache uses one quarter of the RAM of a float32 cache.
+    HoMMI preserves the source field of view by padding the shorter image axis
+    with black pixels until the frame is square, then resizing that square to
+    ``image_size``. The returned representation stays ``uint8 [N,3,H,W]`` so a
+    full training cache uses one quarter of the RAM of a float32 cache.
 
     This is intentionally *not* model augmentation. HoMMI's stochastic 95%
     RandomCrop/Resize/ColorJitter (and eval CenterCrop/Resize) remain in
@@ -156,20 +157,26 @@ def preprocess_rgb_uint8(frames: torch.Tensor, *, image_size: int) -> torch.Tens
         raise ValueError("image_size must be positive")
 
     height, width = int(frames.shape[-2]), int(frames.shape[-1])
-    side = min(height, width)
-    top = (height - side) // 2
-    left = (width - side) // 2
-    x = frames[..., top : top + side, left : left + side]
+    side = max(height, width)
+    pad_height = side - height
+    pad_width = side - width
+    top = pad_height // 2
+    bottom = pad_height - top
+    left = pad_width // 2
+    right = pad_width - left
+
+    # torch.nn.functional.pad uses (left, right, top, bottom) for NCHW.
+    # Constant zero matches HoMMI's cv2.BORDER_CONSTANT preprocessing.
+    x = F.pad(frames, (left, right, top, bottom), mode="constant", value=0)
 
     if side != image_size:
-        # Interpolation needs floating-point math, but the temporary float tensor
-        # is discarded immediately. Only the compact uint8 result is cached.
+        # HoMMI uses cv2.INTER_AREA for the deterministic dataset resize. PyTorch
+        # ``area`` preserves the same downsampling intent without adding OpenCV as
+        # a training dependency. The temporary float tensor is immediately freed.
         x = F.interpolate(
             x.to(dtype=torch.float32),
             size=(image_size, image_size),
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
+            mode="area",
         )
         x = x.round_().clamp_(0, 255).to(dtype=torch.uint8)
     elif x.dtype != torch.uint8:

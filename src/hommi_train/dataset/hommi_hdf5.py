@@ -45,7 +45,7 @@ class HommiHDF5Dataset(Dataset[dict[str, Any]]):
 
     Encoded H.264 stays in HDF5 as the storage format. For long training runs,
     ``frame_cache="ram"`` decodes only dataset-referenced frames once, performs
-    deterministic center-square crop + resize, and retains compact uint8 frames
+    deterministic black-pad-to-square + resize, and retains compact uint8 frames
     in host RAM. Train/eval augmentation remains the encoder's job.
     """
 

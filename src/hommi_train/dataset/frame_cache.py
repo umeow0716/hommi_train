@@ -29,8 +29,8 @@ class HDF5VideoFrameCache:
       ``ram``:  preload the referenced working set once as CPU uint8 tensors.
 
     ``ram`` is intended for long training runs. Source H.264 remains the compact
-    on-disk format; only dataset-referenced frames are decoded, center-square
-    cropped, resized, and retained in host RAM.
+    on-disk format; only dataset-referenced frames are decoded, black-padded to square,
+    resized, and retained in host RAM.
     """
 
     def __init__(

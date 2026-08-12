@@ -32,6 +32,16 @@ def test_preprocess_rgb_uint8_keeps_compact_dtype() -> None:
     assert output.is_contiguous()
 
 
+def test_preprocess_rgb_uint8_pads_instead_of_center_cropping() -> None:
+    # A 2x4 all-white frame becomes 4x4 by adding one black row at top/bottom.
+    # With no resize required, the exact letterbox geometry is directly visible.
+    frames = torch.full((1, 3, 2, 4), 255, dtype=torch.uint8)
+    output = preprocess_rgb_uint8(frames, image_size=4)
+    assert torch.count_nonzero(output[..., 0, :]) == 0
+    assert torch.count_nonzero(output[..., -1, :]) == 0
+    assert torch.all(output[..., 1:3, :] == 255)
+
+
 def test_ram_cache_preloads_only_referenced_unique_frames() -> None:
     decoder = _FakeDecoderCache()
     cache = HDF5VideoFrameCache(
@@ -54,8 +64,10 @@ def test_ram_cache_preloads_only_referenced_unique_frames() -> None:
     assert len(decoder.calls) == calls_before
     assert output.shape == (3, 3, 8, 8)
     assert output.dtype == torch.uint8
-    assert int(output[0, 0, 0, 0]) == 5
-    assert int(output[1, 0, 0, 0]) == 1
+    # The source is 10x12, so HoMMI-style preprocessing adds black rows before
+    # resizing. Check an interior pixel where the constant source value remains.
+    assert int(output[0, 0, 4, 4]) == 5
+    assert int(output[1, 0, 4, 4]) == 1
 
 
 def test_lru_cache_reuses_hits() -> None:

@@ -533,7 +533,7 @@ Image pipeline:
 HDF5 H.264
   -> referenced source frames only
   -> decode once
-  -> deterministic center-square crop
+  -> deterministic black-pad-to-square
   -> resize to image_size
   -> uint8 RAM cache
   -> float [0,1] sample
