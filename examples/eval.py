@@ -1,4 +1,4 @@
-"""Evaluate a trained HoMMI portable model with TensorRT."""
+"""Offline validation-dataset evaluation with TensorRT."""
 
 from __future__ import annotations
 

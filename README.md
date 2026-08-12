@@ -156,26 +156,114 @@ uv run python -m hommi_train eval \
 
 TensorRT compilation targets the compute-heavy vision backbone and ActionDiT denoiser. DDIM scheduler orchestration stays in PyTorch.
 
-### 4. Evaluate from Python
+### 4. Real-time inference / deployment from Python
 
-The public API exposes the same evaluation pipeline used by the CLI:
+For a robot process you normally load `model.pt` once, configure TensorRT once,
+and call `policy.predict_action()` for every synchronized observation.  A minimal
+single-iteration example is included at
+[`examples/deploy.py`](https://github.com/umeow0716/hommi_train/blob/main/examples/deploy.py).
+It deliberately uses black NumPy images and zero EEF positions so the input
+shapes and action semantics are visible without requiring a camera or robot SDK.
+The real dataset represents the EEF observation history relative to its newest
+EEF pose, so a stationary dummy history naturally has zero position and identity
+rotation-6D:
 
 ```python
-from hommi_train import run_evaluation
+from contextlib import nullcontext
 
-result = run_evaluation(
-    "data/pick_place.hdf5",
-    "runs/pick_place/model.pt",
-    mode="full",
-    device="cuda",
-    precision="auto",
-    backend="tensorrt",
+import numpy as np
+import torch
+
+from hommi_train import (
+    configure_evaluation_backend,
+    hommi_train_config_from_mapping,
+    load_portable_policy,
+    resolve_device,
+    resolve_precision,
 )
 
-print(result.to_dict())
+model_path = "runs/pick_place/model.pt"
+device = resolve_device("cuda")
+policy, artifact = load_portable_policy(model_path, device=device)
+config = hommi_train_config_from_mapping(artifact["config"])
+precision = resolve_precision("auto", device)
+
+configure_evaluation_backend(
+    policy,
+    backend="tensorrt",
+    device=device,
+    compile_mode=config.evaluation.compile_mode,
+    tensorrt=config.evaluation.tensorrt,
+    precision=precision,
+)
+
+# Default single-arm shape_meta: image [3,224,224], obs horizon 2.
+black_rgb = np.zeros((2, 224, 224, 3), dtype=np.uint8)
+rgb = torch.from_numpy(black_rgb).permute(0, 3, 1, 2).float() / 255.0
+
+# Position is zero. Rotation-6D uses identity R; six zeros are not a valid rotation.
+position = torch.zeros((2, 3), dtype=torch.float32)
+rotation6d = torch.tensor(
+    [[1, 0, 0, 0, 1, 0], [1, 0, 0, 0, 1, 0]],
+    dtype=torch.float32,
+)
+gripper = torch.zeros((2, 1), dtype=torch.float32)
+
+obs = {
+    "camera0_main_rgb": rgb.unsqueeze(0).to(device),        # [1,2,3,224,224]
+    "robot0_eef_pos": position.unsqueeze(0).to(device),    # [1,2,3]
+    "robot0_eef_rot_axis_angle": rotation6d.unsqueeze(0).to(device),  # [1,2,6]
+    "robot0_gripper_width": gripper.unsqueeze(0).to(device),          # [1,2,1]
+}
+
+autocast = (
+    torch.autocast("cuda", dtype=torch.bfloat16)
+    if precision == "bf16"
+    else nullcontext()
+)
+with torch.inference_mode(), autocast:
+    prediction = policy.predict_action(obs)
+
+# Default single-arm result: [B=1, n_action_steps=8, action_dim=10].
+action_chunk = prediction["action"]
+first_action = action_chunk[0, 0].float().cpu().numpy()
+
+# One 10-D step is:
+# [rel_x, rel_y, rel_z,
+#  r00, r01, r02, r10, r11, r12,
+#  gripper]
+#
+# Example only:
+# [0.012, -0.004, 0.020, 0.999, 0.010, -0.030,
+#  -0.009, 1.000, 0.004, 0.72]
+print(first_action)
 ```
 
-A standalone version is included at [`examples/eval.py`](https://github.com/umeow0716/hommi_train/blob/main/examples/eval.py).
+The XYZ and rotation-6D fields describe a future EEF pose **relative to the last
+observation EEF frame**.  For a single-arm controller, reconstruct `T_rel` from
+the first 9 values and apply:
+
+```text
+T_world_target = T_world_current @ T_rel
+```
+
+Then send `T_world_target` to the robot pose controller and the final scalar to
+the gripper controller (`0 = closed`, `1 = open`).  `examples/deploy.py` contains
+the complete `rotation6D -> R -> T_rel -> T_world_target` code.
+
+For real observations, keep the last `obs_horizon` EEF world transforms and
+express that history relative to the newest transform before inference (the
+library's `hommi_train.dataset.relative_pose9()` uses the same convention as the
+training dataset).  Likewise, every row in one predicted action chunk is relative
+to the **same EEF frame at prediction time**; the rows are future target poses,
+not transforms that should be chained together.
+
+In a normal receding-horizon loop, acquire a fresh synchronized camera/robot
+observation, run `predict_action()`, execute the first action (or a short prefix),
+and repeat.
+
+For offline validation-dataset metrics, keep using `run_evaluation()` or
+[`examples/eval.py`](https://github.com/umeow0716/hommi_train/blob/main/examples/eval.py).
 
 ## Task YAML
 
@@ -486,6 +574,10 @@ model = DiTModelConfig(encoder=encoder)
 configs/
 ├── default.yaml
 └── tasks/
+
+examples/
+├── deploy.py        # real-time TensorRT inference / robot integration
+└── eval.py          # offline validation-dataset evaluation
 
 src/hommi_train/
 ├── configuration/   # task YAML generation/loading
