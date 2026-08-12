@@ -307,7 +307,7 @@ wheels = [
 [[package]]
 name = "hommi-dataset"
 version = "0.2.0"
-source = { git = "https://github.com/umeow0716/hommi_dataset.git#64b6ecf39fe93fbde44bcfc6b0482488d199d0a0" }
+source = { git = "https://github.com/umeow0716/hommi_dataset.git#2e099249c5b5f43c32817c87b5afe2b565c221db" }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
