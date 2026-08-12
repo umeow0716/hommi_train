@@ -318,9 +318,10 @@ dependencies = [
 
 [[package]]
 name = "hommi-train"
-version = "0.1.1"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "diffusers" },
     { name = "h5py" },
     { name = "hommi-dataset" },
     { name = "hommi-diffusion-policy" },
@@ -336,6 +337,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "diffusers", specifier = ">=0.18.2,<1" },
     { name = "h5py", specifier = ">=3.16.0" },
     { name = "hommi-dataset", git = "https://github.com/umeow0716/hommi_dataset.git" },
     { name = "hommi-diffusion-policy", git = "https://github.com/umeow0716/hommi_diffusion_policy.git" },

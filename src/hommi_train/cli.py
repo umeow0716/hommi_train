@@ -9,7 +9,7 @@ from .dataset import inspect_hommi_hdf5
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hommi-train",
-        description="HoMMI training pipeline (dataset milestone).",
+        description="HoMMI training pipeline (composition milestone).",
     )
     parser.add_argument("-i", "--input", type=Path, required=True, help="HoMMI HDF5 dataset")
     parser.add_argument(
@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=Path("outputs/hommi"),
-        help="training output directory (reserved for trainer milestone)",
+        help="training output directory (used by the upcoming trainer milestone)",
     )
     parser.add_argument(
         "--inspect-dataset",
@@ -31,7 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.inspect_dataset:
         raise SystemExit(
-            "The dataset layer is implemented; the training runner is the next milestone. "
+            "Dataset, split, normalization, and policy composition are implemented; "
+            "the training runner is the next milestone. "
             "Use --inspect-dataset for now."
         )
 

@@ -34,6 +34,21 @@ class DiTTrainConfig:
     sample_every: int = 10
     log_grad_norm_every: int = 50
     seed: int = 42
+    betas: tuple[float, float] = (0.95, 0.999)
+
+
+@dataclass(frozen=True, slots=True)
+class DDIMConfig:
+    """Noise-scheduler defaults used by HoMMI's DiT training recipe."""
+
+    num_train_timesteps: int = 50
+    beta_start: float = 0.0001
+    beta_end: float = 0.02
+    beta_schedule: str = "squaredcos_cap_v2"
+    clip_sample: bool = True
+    set_alpha_to_one: bool = True
+    steps_offset: int = 0
+    prediction_type: str = "epsilon"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,3 +65,9 @@ class DiTModelConfig:
     num_heads: int = 8
     mlp_ratio: float = 4.0
     train_diffusion_n_samples: int = 8
+    qkv_bias: bool = True
+    use_rms_norm: bool = True
+    input_perturbation: float = 0.0
+    obs_as_global_cond: bool = True
+    use_flow_matching: bool = False
+    fm_tsampler: Literal["uniform", "beta"] = "uniform"

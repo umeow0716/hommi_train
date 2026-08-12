@@ -1,6 +1,6 @@
 [project]
 name = "hommi-train"
-version = "0.1.1"
+version = "0.2.0"
 description = "Training pipeline for HoMMI diffusion policies and hommi-dataset HDF5 files"
 readme = "README.md"
 authors = [
@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "diffusers>=0.18.2,<1",
     "h5py>=3.16.0",
     "hommi-dataset>=0.2.0",
     "hommi-diffusion-policy>=0.1.7",
