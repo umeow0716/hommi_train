@@ -33,13 +33,13 @@ python -m pip install .
 Install into the active environment:
 
 ```bash
-uv pip install hommi-train
+uv pip install git+https://github.com/umeow0716/hommi-train
 ```
 
 Or add it to an existing uv project:
 
 ```bash
-uv add hommi-train
+uv add git+https://github.com/umeow0716/hommi-train
 ```
 
 From a local checkout:
