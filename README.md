@@ -19,7 +19,7 @@ TensorRT support is a **required package dependency**, not an optional extra. Th
 After the packages are published:
 
 ```bash
-python -m pip install hommi-train
+python -m pip install git+https://github.com/umeow0716/hommi-train
 ```
 
 From a local checkout:
