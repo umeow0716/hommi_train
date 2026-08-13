@@ -53,6 +53,46 @@ def _clone_capture_value(value: Any) -> Any:
     return value
 
 
+def _cast_floating_tensors(value: Any, dtype: torch.dtype) -> Any:
+    """Recursively cast only floating-point tensors, preserving integer inputs."""
+    if isinstance(value, torch.Tensor):
+        if value.is_floating_point():
+            return value.to(dtype=dtype)
+        return value
+    if isinstance(value, tuple):
+        return tuple(_cast_floating_tensors(item, dtype) for item in value)
+    if isinstance(value, list):
+        return [_cast_floating_tensors(item, dtype) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _cast_floating_tensors(item, dtype)
+            for key, item in value.items()
+        }
+    return value
+
+
+class _TensorRTBF16Adapter(nn.Module):
+    """Keep the policy's public FP32 boundary around an explicitly-BF16 TRT module.
+
+    Torch-TensorRT's Dynamo path uses strong typing.  We therefore compile BF16
+    artifacts with BF16 weights/inputs instead of its rule-based autocast pass
+    (which currently mishandles list-valued FX metadata from ops such as
+    ``unbind``/``chunk``).  At runtime this tiny adapter casts floating inputs to
+    BF16 and floating outputs back to FP32 so the surrounding HoMMI policy and
+    DDIM scheduler retain their existing eager-PyTorch dtype behavior.
+    """
+
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        bf16_args = _cast_floating_tensors(args, torch.bfloat16)
+        bf16_kwargs = _cast_floating_tensors(kwargs, torch.bfloat16)
+        output = self.module(*bf16_args, **bf16_kwargs)
+        return _cast_floating_tensors(output, torch.float32)
+
+
 def _capture_module_inputs(
     policy: nn.Module,
     shape_meta: dict[str, Any],
@@ -156,29 +196,40 @@ def _compile_one_module(
     precision: Literal["fp32", "bf16"],
 ) -> None:
     """AOT compile one pure-tensor module and serialize embedded TRT engines."""
+    compile_module = module.eval()
+    compile_args = args
+    compile_kwargs_inputs = kwargs
+
+    if precision == "bf16":
+        # Dynamo/TensorRT uses strong typing.  Compile an explicitly-BF16 graph
+        # instead of enabling Torch-TensorRT's rule-based autocast pass.  The
+        # latter currently assumes every classified node has Tensor metadata
+        # and crashes on list-valued outputs produced by ops such as
+        # aten.unbind/aten.chunk (``list`` has no ``.to``).
+        compile_module = compile_module.to(dtype=torch.bfloat16)
+        compile_args = _cast_floating_tensors(args, torch.bfloat16)
+        compile_kwargs_inputs = _cast_floating_tensors(kwargs, torch.bfloat16)
+
     exported = torch.export.export(
-        module.eval(),
-        args=args,
-        kwargs=kwargs,
+        compile_module,
+        args=compile_args,
+        kwargs=compile_kwargs_inputs,
         strict=False,
     )
 
-    compile_kwargs: dict[str, Any] = {
-        "arg_inputs": args,
-        "kwarg_inputs": kwargs,
+    compile_options: dict[str, Any] = {
+        "arg_inputs": compile_args,
+        "kwarg_inputs": compile_kwargs_inputs,
         "min_block_size": min_block_size,
         "optimization_level": optimization_level,
     }
-    if precision == "bf16":
-        compile_kwargs["enable_autocast"] = True
-        compile_kwargs["autocast_low_precision_type"] = torch.bfloat16
 
-    compiled = torch_tensorrt.dynamo.compile(exported, **compile_kwargs)
+    compiled = torch_tensorrt.dynamo.compile(exported, **compile_options)
     torch_tensorrt.save(
         compiled,
         output_path,
-        arg_inputs=args,
-        kwarg_inputs=kwargs,
+        arg_inputs=compile_args,
+        kwarg_inputs=compile_kwargs_inputs,
         output_format="exported_program",
         retrace=False,
     )
@@ -354,14 +405,22 @@ def load_tensorrt_policy(
         )
 
         modules = manifest["modules"]
+        explicit_bf16 = manifest.get("precision") == "bf16"
+
+        def load_module(filename: str) -> nn.Module:
+            loaded = torch_tensorrt.load(temp / filename).module()
+            if explicit_bf16:
+                return _TensorRTBF16Adapter(loaded)
+            return loaded
+
         if "denoiser" in modules:
-            policy.model = torch_tensorrt.load(temp / modules["denoiser"]).module()
+            policy.model = load_module(modules["denoiser"])
 
         key_model_map = getattr(policy.obs_encoder, "key_model_map", None)
         for name, keys in manifest.get("backbone_aliases", {}).items():
             if name not in modules:
                 continue
-            loaded = torch_tensorrt.load(temp / modules[name]).module()
+            loaded = load_module(modules[name])
             for key in keys:
                 key_model_map[key] = loaded
 
