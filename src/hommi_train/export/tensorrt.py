@@ -466,7 +466,6 @@ def load_tensorrt_policy(
             for key in keys:
                 key_model_map[key] = loaded
 
-        policy.eval()
         # Keep extracted files alive for runtimes that lazily access serialized
         # resources after load. nn.Module permits arbitrary Python attributes.
         policy._hommi_tensorrt_tempdir = tempdir  # type: ignore[attr-defined]

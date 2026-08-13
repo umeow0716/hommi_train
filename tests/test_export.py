@@ -113,3 +113,75 @@ def test_explicit_bf16_prep_casts_timestep_embedding_before_linear() -> None:
 
     output = module.timestep_embedding(torch.tensor([1, 2], dtype=torch.long))
     assert output.dtype == torch.bfloat16
+
+
+def test_load_tensorrt_policy_does_not_eval_exported_program_modules(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import json
+    import sys
+    import types
+    import zipfile
+
+    import hommi_train.export.tensorrt as trt_export
+
+    class InferenceOnlyModule(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        def train(self, mode: bool = True):
+            raise NotImplementedError("Calling train() is not supported yet.")
+
+    class FakeExportedProgram:
+        def module(self) -> nn.Module:
+            return InferenceOnlyModule()
+
+    fake_torch_tensorrt = types.SimpleNamespace(
+        load=lambda _path: FakeExportedProgram(),
+    )
+    monkeypatch.setitem(sys.modules, "torch_tensorrt", fake_torch_tensorrt)
+
+    class DummyEncoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.key_model_map = nn.ModuleDict({"camera": nn.Identity()})
+
+    class DummyPolicy(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model = nn.Identity()
+            self.obs_encoder = DummyEncoder()
+
+    eager_policy = DummyPolicy().eval()
+    monkeypatch.setattr(
+        trt_export,
+        "load_portable_policy",
+        lambda *_args, **_kwargs: (eager_policy, {"shape_meta": {}}),
+    )
+
+    bundle = tmp_path / "model.trt.ep"
+    manifest = {
+        "format": trt_export._BUNDLE_FORMAT,
+        "format_version": trt_export._BUNDLE_VERSION,
+        "portable_model": "model.pt",
+        "precision": "fp32",
+        "modules": {
+            "denoiser": "denoiser.ep",
+            "backbone_0": "backbone_0.ep",
+        },
+        "backbone_aliases": {"backbone_0": ["camera"]},
+    }
+    with zipfile.ZipFile(bundle, "w") as archive:
+        archive.writestr("manifest.json", json.dumps(manifest))
+        archive.writestr("model.pt", b"unused")
+        archive.writestr("denoiser.ep", b"unused")
+        archive.writestr("backbone_0.ep", b"unused")
+
+    policy, payload = trt_export.load_tensorrt_policy(bundle, device="cuda:0")
+
+    assert policy is eager_policy
+    assert not policy.training
+    assert isinstance(policy.model, InferenceOnlyModule)
+    assert isinstance(policy.obs_encoder.key_model_map["camera"], InferenceOnlyModule)
+    assert payload["tensorrt_bundle"]["precision"] == "fp32"
