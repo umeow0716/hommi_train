@@ -111,5 +111,6 @@ def test_tensorrt_cli_accepts_run_directory() -> None:
         ["-i", "runs/pick_place", "--precision", "bf16", "--batch-size", "1"]
     )
     assert args.input == Path("runs/pick_place")
+    assert args.output is None
     assert args.precision == "bf16"
     assert args.batch_size == 1

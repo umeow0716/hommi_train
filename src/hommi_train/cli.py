@@ -197,7 +197,8 @@ def build_tensorrt_parser() -> argparse.ArgumentParser:
         "-o",
         "--output",
         type=Path,
-        help="output artifact path (default: <input>/model.trt.ep)",
+        default=None,
+        help="optional output artifact path; defaults to <input>/model.trt.ep",
     )
     parser.add_argument(
         "--device",

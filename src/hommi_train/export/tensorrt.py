@@ -102,12 +102,44 @@ def compile_portable_model_tensorrt(
         compile_kwargs["autocast_low_precision_type"] = torch.bfloat16
 
     with torch.inference_mode():
-        compiled = torch_tensorrt.compile(module, **compile_kwargs)
+        # Export explicitly before handing the graph to Torch-TensorRT.  The
+        # wrapper intentionally exposes ``forward(*inputs)`` so it can support
+        # arbitrary HoMMI observation layouts.  Calling the high-level
+        # ``torch_tensorrt.compile(nn.Module, ...)`` path makes Torch-TensorRT
+        # infer ``dynamic_shapes`` from that varargs signature; recent
+        # Torch/Torch-TensorRT versions can represent the same inputs as a
+        # tuple in ``combined_args`` but a dict in ``dynamic_shapes``, causing
+        # torch.export's PyTree validation to fail before tracing begins.
+        #
+        # ``torch.export.export`` already handles our static positional tensor
+        # tuple correctly.  Compiling that ExportedProgram is also an official
+        # Torch-TensorRT Dynamo AOT workflow and avoids the erroneous automatic
+        # dynamic-shape reconstruction entirely.
+        exported = torch.export.export(
+            module,
+            args=example_inputs,
+            strict=False,
+        )
+        compiled = torch_tensorrt.dynamo.compile(
+            exported,
+            arg_inputs=example_inputs,
+            min_block_size=compile_kwargs["min_block_size"],
+            optimization_level=compile_kwargs["optimization_level"],
+            enable_autocast=compile_kwargs.get("enable_autocast", False),
+            autocast_low_precision_type=compile_kwargs.get(
+                "autocast_low_precision_type"
+            ),
+        )
+        # ``compiled`` is already a TensorRT-partitioned FX GraphModule.  Do
+        # not retrace it during serialization: retracing would re-enter the
+        # same varargs/dynamic_shapes inference path we deliberately avoided
+        # above.  retrace=False serializes the existing compiled graph and its
+        # embedded TensorRT engines directly.
         torch_tensorrt.save(
             compiled,
             output,
-            arg_inputs=example_inputs,
             output_format="exported_program",
+            retrace=False,
         )
 
     metadata = {
