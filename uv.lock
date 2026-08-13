@@ -387,7 +387,7 @@ dependencies = [
 [[package]]
 name = "hommi-diffusion-policy"
 version = "0.2.0"
-source = { git = "https://github.com/umeow0716/hommi_diffusion_policy.git#0d4a1669a7d28b74e3b597725d278efab8fea02d" }
+source = { git = "https://github.com/umeow0716/hommi_diffusion_policy.git#de9781922c8a0d7d489e1930c5477a5ed74bb9c6" }
 dependencies = [
     { name = "diffusers" },
     { name = "timm" },
