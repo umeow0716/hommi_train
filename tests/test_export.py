@@ -60,7 +60,7 @@ def test_portable_payload_round_trip_uses_weights_only_loader(tmp_path: Path) ->
 def test_policy_inference_module_adapts_ordered_tensor_tuple() -> None:
     module = PolicyInferenceModule(_TinyInferencePolicy(), ("x",))
     x = torch.arange(8, dtype=torch.float32).reshape(2, 2, 2)
-    output = module((x,))
+    output = module(x)
     torch.testing.assert_close(output, x[:, -1:] * 2.0)
 
 
@@ -76,7 +76,7 @@ def test_torch_export_pt2_round_trip_for_exportable_policy(tmp_path: Path) -> No
     extra = {"hommi_metadata.json": ""}
     exported = torch.export.load(path, extra_files=extra)
     x = torch.ones(1, 2, 2)
-    output = exported.module()((x,))
+    output = exported.module()(x)
     torch.testing.assert_close(output, x[:, -1:] * 2.0)
     assert '"obs_keys": ["x"]' in extra["hommi_metadata.json"]
 

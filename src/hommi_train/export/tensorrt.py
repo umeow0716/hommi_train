@@ -91,9 +91,9 @@ def compile_portable_model_tensorrt(
     trt_cfg = config.evaluation.tensorrt
     compile_kwargs: dict[str, Any] = {
         "ir": "dynamo",
-        # PolicyInferenceModule receives the observation tensor tuple as one
-        # positional argument, hence this deliberately nested arg_inputs tuple.
-        "arg_inputs": (example_inputs,),
+        # Each observation is a top-level positional tensor. Torch-TensorRT
+        # does not accept a tuple nested as one ``arg_inputs`` element.
+        "arg_inputs": example_inputs,
         "min_block_size": trt_cfg.min_block_size,
         "optimization_level": trt_cfg.optimization_level,
     }
@@ -106,7 +106,7 @@ def compile_portable_model_tensorrt(
         torch_tensorrt.save(
             compiled,
             output,
-            arg_inputs=(example_inputs,),
+            arg_inputs=example_inputs,
             output_format="exported_program",
         )
 

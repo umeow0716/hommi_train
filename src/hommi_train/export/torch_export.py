@@ -13,9 +13,11 @@ from .artifact import load_portable_policy
 class PolicyInferenceModule(nn.Module):
     """Tensor-only inference facade around the policy's dictionary API.
 
-    Inputs are passed as one tuple in ``obs_keys`` order. The output is the
-    executable ``action`` chunk rather than the full diagnostic dictionary.
-    This facade is useful for ``torch.compile`` and experimental ``torch.export``.
+    Inputs are positional tensors in ``obs_keys`` order. Keeping every
+    observation as a top-level positional argument is important for
+    Torch-TensorRT's Dynamo frontend, whose ``arg_inputs`` accepts tensors (or
+    ``torch_tensorrt.Input`` specs) rather than a tuple nested as one argument.
+    The output is the executable ``action`` chunk.
     """
 
     def __init__(self, policy: nn.Module, obs_keys: Sequence[str]) -> None:
@@ -23,7 +25,7 @@ class PolicyInferenceModule(nn.Module):
         self.policy = policy
         self.obs_keys = tuple(obs_keys)
 
-    def forward(self, inputs: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    def forward(self, *inputs: torch.Tensor) -> torch.Tensor:
         if len(inputs) != len(self.obs_keys):
             raise ValueError(
                 f"expected {len(self.obs_keys)} observation tensors, got {len(inputs)}"
@@ -114,7 +116,7 @@ def export_policy_pt2(
     wrapper = PolicyInferenceModule(policy, keys).eval()
     exported = torch.export.export(
         wrapper,
-        args=(example_inputs,),
+        args=example_inputs,
         strict=strict,
     )
     metadata = {
