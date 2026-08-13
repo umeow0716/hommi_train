@@ -182,8 +182,9 @@ def build_tensorrt_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m hommi_train tensorrt",
         description=(
-            "Compile <run-directory>/model.pt into a serialized Torch-TensorRT "
-            "Dynamo artifact."
+            "Compile the DiT denoiser and vision backbone(s) from "
+            "<run-directory>/model.pt into a single TensorRT deployment bundle. "
+            "DDIM scheduling remains eager PyTorch."
         ),
     )
     parser.add_argument(

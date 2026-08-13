@@ -10,6 +10,7 @@ from .runner import default_portable_path, run_export
 from .tensorrt import (
     compile_portable_model_tensorrt,
     default_tensorrt_path,
+    load_tensorrt_policy,
     resolve_model_path,
 )
 from .torch_export import (
@@ -27,6 +28,7 @@ __all__ = [
     "PolicyInferenceModule",
     "default_portable_path",
     "default_tensorrt_path",
+    "load_tensorrt_policy",
     "compile_portable_model_tensorrt",
     "active_observation_keys",
     "build_inference_module",

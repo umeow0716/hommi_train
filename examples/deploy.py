@@ -26,6 +26,7 @@ from hommi_train import (
     configure_evaluation_backend,
     hommi_train_config_from_mapping,
     load_portable_policy,
+    load_tensorrt_policy,
     resolve_device,
     resolve_precision,
 )
@@ -150,18 +151,26 @@ def main() -> None:
     # TensorRT deployment targets CUDA.  ``precision=auto`` selects BF16 when
     # the CUDA device supports it, otherwise FP32.
     device = resolve_device("cuda")
-    policy, artifact = load_portable_policy(args.model, device=device)
-    config = hommi_train_config_from_mapping(artifact["config"])
-    precision = resolve_precision("auto", device)
-
-    backend = configure_evaluation_backend(
-        policy,
-        backend="tensorrt",
-        device=device,
-        compile_mode=config.evaluation.compile_mode,
-        tensorrt=config.evaluation.tensorrt,
-        precision=precision,
-    )
+    if args.model.name.endswith(".trt.ep"):
+        # Precompiled bundle: load embedded TensorRT engines directly. DDIM
+        # orchestration remains eager PyTorch; no TensorRT rebuild occurs here.
+        policy, artifact = load_tensorrt_policy(args.model, device=device)
+        config = hommi_train_config_from_mapping(artifact["config"])
+        precision = artifact["tensorrt_bundle"]["precision"]
+        backend = "tensorrt-aot"
+    else:
+        # Portable model.pt: compile heavy submodules lazily for this process.
+        policy, artifact = load_portable_policy(args.model, device=device)
+        config = hommi_train_config_from_mapping(artifact["config"])
+        precision = resolve_precision("auto", device)
+        backend = configure_evaluation_backend(
+            policy,
+            backend="tensorrt",
+            device=device,
+            compile_mode=config.evaluation.compile_mode,
+            tensorrt=config.evaluation.tensorrt,
+            precision=precision,
+        )
     print(f"device={device}, precision={precision}, backend={backend}")
 
     # ---------------------------------------------------------------------
