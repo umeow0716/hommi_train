@@ -125,4 +125,4 @@ __all__ = [
     "validate_task_against_dataset",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"

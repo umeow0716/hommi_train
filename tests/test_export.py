@@ -88,3 +88,28 @@ def test_tensorrt_directory_resolution(tmp_path: Path) -> None:
     model.touch()
     assert resolve_model_path(tmp_path) == model.resolve()
     assert default_tensorrt_path(tmp_path) == (tmp_path / "model.trt.ep").resolve()
+
+
+def test_explicit_bf16_prep_casts_timestep_embedding_before_linear() -> None:
+    from hommi_train.export.tensorrt import _prepare_explicit_bf16_module
+
+    class FloatEmbedding(nn.Module):
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x.to(dtype=torch.float32).unsqueeze(-1).repeat(1, 4)
+
+    class TinyDenoiser(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.timestep_embedding = nn.Sequential(
+                FloatEmbedding(),
+                nn.Linear(4, 4),
+            )
+
+    module = _prepare_explicit_bf16_module(TinyDenoiser())
+
+    assert module.timestep_embedding[1].weight.dtype == torch.bfloat16
+    embedded = module.timestep_embedding[0](torch.tensor([1, 2], dtype=torch.long))
+    assert embedded.dtype == torch.bfloat16
+
+    output = module.timestep_embedding(torch.tensor([1, 2], dtype=torch.long))
+    assert output.dtype == torch.bfloat16

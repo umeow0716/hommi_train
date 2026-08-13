@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 import zipfile
@@ -91,6 +92,39 @@ class _TensorRTBF16Adapter(nn.Module):
         bf16_kwargs = _cast_floating_tensors(kwargs, torch.bfloat16)
         output = self.module(*bf16_args, **bf16_kwargs)
         return _cast_floating_tensors(output, torch.float32)
+
+
+class _CastFloatingOutput(nn.Module):
+    """Cast floating outputs from a wrapped module while preserving integers."""
+
+    def __init__(self, module: nn.Module, dtype: torch.dtype) -> None:
+        super().__init__()
+        self.module = module
+        self.dtype = dtype
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        return _cast_floating_tensors(self.module(*args, **kwargs), self.dtype)
+
+
+def _prepare_explicit_bf16_module(module: nn.Module) -> nn.Module:
+    """Make HoMMI's explicit-BF16 graph strongly typed for TensorRT.
+
+    ``SinusoidalPosEmb`` intentionally creates FP32 frequencies.  Under normal
+    eager training, autocast converts the following Linear as needed.  The
+    TensorRT Dynamo path is strongly typed, so after converting the denoiser
+    weights to BF16 we must make the FP32 -> BF16 edge explicit *before* the
+    first timestep Linear.  Casting only after the whole timestep MLP is too
+    late and produces a Float x BFloat16 matrix multiply during conversion.
+    """
+    module = module.to(dtype=torch.bfloat16)
+
+    timestep_embedding = getattr(module, "timestep_embedding", None)
+    if isinstance(timestep_embedding, nn.Sequential) and len(timestep_embedding) >= 2:
+        first = timestep_embedding[0]
+        if not isinstance(first, _CastFloatingOutput):
+            timestep_embedding[0] = _CastFloatingOutput(first, torch.bfloat16)
+
+    return module
 
 
 def _capture_module_inputs(
@@ -201,12 +235,11 @@ def _compile_one_module(
     compile_kwargs_inputs = kwargs
 
     if precision == "bf16":
-        # Dynamo/TensorRT uses strong typing.  Compile an explicitly-BF16 graph
-        # instead of enabling Torch-TensorRT's rule-based autocast pass.  The
-        # latter currently assumes every classified node has Tensor metadata
-        # and crashes on list-valued outputs produced by ops such as
-        # aten.unbind/aten.chunk (``list`` has no ``.to``).
-        compile_module = compile_module.to(dtype=torch.bfloat16)
+        # Dynamo/TensorRT uses strong typing. Compile an explicitly-BF16 graph
+        # instead of enabling Torch-TensorRT's graph autocast pass. HoMMI's
+        # sinusoidal timestep embedding emits FP32 by design, so make that
+        # FP32 -> BF16 edge explicit before its first Linear as well.
+        compile_module = _prepare_explicit_bf16_module(compile_module)
         compile_args = _cast_floating_tensors(args, torch.bfloat16)
         compile_kwargs_inputs = _cast_floating_tensors(kwargs, torch.bfloat16)
 
@@ -217,11 +250,15 @@ def _compile_one_module(
         strict=False,
     )
 
+    # The deployment target can be a memory-constrained Jetson. Offloading the
+    # source module after conversion frees one GPU-side model copy while the TRT
+    # builder works.
     compile_options: dict[str, Any] = {
         "arg_inputs": compile_args,
         "kwarg_inputs": compile_kwargs_inputs,
         "min_block_size": min_block_size,
         "optimization_level": optimization_level,
+        "offload_module_to_cpu": True,
     }
 
     compiled = torch_tensorrt.dynamo.compile(exported, **compile_options)
@@ -273,6 +310,11 @@ def compile_portable_model_tensorrt(
     resolved_device = resolve_device(device)
     if resolved_device.type != "cuda":
         raise RuntimeError("TensorRT compilation requires a CUDA device")
+
+    # Torch-TensorRT reads this when creating TensorRT builders. Enable its
+    # malloc trimming before importing/using the runtime so transient host-side
+    # model copies are returned more aggressively on memory-constrained systems.
+    os.environ.setdefault("TORCHTRT_ENABLE_BUILDER_MALLOC_TRIM", "1")
 
     try:
         import torch_tensorrt
