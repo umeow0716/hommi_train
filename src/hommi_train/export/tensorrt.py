@@ -207,6 +207,19 @@ def _compile_one_module(
         # and crashes on list-valued outputs produced by ops such as
         # aten.unbind/aten.chunk (``list`` has no ``.to``).
         compile_module = compile_module.to(dtype=torch.bfloat16)
+
+        # HoMMI's DiT timestep sinusoidal embedding intentionally creates
+        # float32 values (torch.arange(..., dtype=torch.float32)).  If the
+        # following timestep MLP weights are blindly converted to BF16,
+        # TensorRT strong typing rejects the first Linear because its activation
+        # is FP32 while the weight is BF16.  Keep only that small embedding MLP
+        # in FP32; DiT.forward already casts its result back to obs_embed.dtype
+        # immediately afterwards, so the expensive transformer body remains
+        # BF16.
+        timestep_embedding = getattr(compile_module, "timestep_embedding", None)
+        if isinstance(timestep_embedding, nn.Module):
+            timestep_embedding.to(dtype=torch.float32)
+
         compile_args = _cast_floating_tensors(args, torch.bfloat16)
         compile_kwargs_inputs = _cast_floating_tensors(kwargs, torch.bfloat16)
 
