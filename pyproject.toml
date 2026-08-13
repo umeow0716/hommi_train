@@ -1,6 +1,6 @@
 [project]
 name = "hommi-train"
-version = "0.6.2"
+version = "0.7.0"
 description = "Training and TensorRT evaluation pipeline for HoMMI diffusion policies and hommi-dataset HDF5 files"
 readme = "README.md"
 license = "MIT"

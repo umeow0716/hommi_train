@@ -14,7 +14,7 @@ from .configuration import init_task_config, load_task_config, validate_task_aga
 from .dataset import inspect_hommi_hdf5
 from .training import load_training_checkpoint
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 
 
 def _add_bool(group: argparse._ArgumentGroup, *names: str, **kwargs: Any) -> None:

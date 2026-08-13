@@ -576,8 +576,10 @@ configs/
 └── tasks/
 
 examples/
-├── deploy.py        # real-time TensorRT inference / robot integration
-└── eval.py          # offline validation-dataset evaluation
+├── deploy.py              # portable-model / TensorRT real-robot example
+├── deploy_tensorrt.py     # precompiled model.trt.ep deployment example
+├── benchmark_tensorrt.py  # end-to-end TensorRT inference latency / Hz
+└── eval.py                # offline validation-dataset evaluation
 
 src/hommi_train/
 ├── configuration/   # task YAML generation/loading
@@ -627,6 +629,24 @@ uv run python -m hommi_train tensorrt \
 ```
 
 TensorRT artifacts are hardware/runtime specific. Build this artifact on the deployment target (for example, a Jetson Orin Nano with its JetPack-compatible PyTorch and Torch-TensorRT stack) rather than assuming a desktop-built TensorRT program is portable to Jetson.
+
+Deploy the precompiled bundle with the standalone example:
+
+```bash
+uv run python examples/deploy_tensorrt.py \
+  -m runs/pick_place/model.trt.ep
+```
+
+Estimate end-to-end policy inference latency and throughput on the current host:
+
+```bash
+uv run python examples/benchmark_tensorrt.py \
+  -m runs/pick_place/model.trt.ep \
+  --warmup 10 \
+  --iterations 100
+```
+
+The benchmark measures `policy.predict_action(obs)`, including the eager DDIM loop and TensorRT ViT/DiT submodules. It synchronizes CUDA around every timed iteration. The reported Hz therefore estimates model inference throughput only; camera capture/decoding, robot I/O, and other control-loop work are excluded.
 
 ## License
 
