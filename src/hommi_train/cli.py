@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m hommi_train",
         description=(
             "Train HoMMI diffusion policies from HDF5 or a task YAML. "
-            "Use `python -m hommi_train init-config`, `eval`, or `export` for other workflows."
+            "Use `python -m hommi_train init-config`, `eval`, `export`, or `tensorrt` for other workflows."
         ),
         argument_default=argparse.SUPPRESS,
     )
@@ -175,6 +175,47 @@ def build_eval_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--compile-mode", help="torch.compile mode for inductor")
     parser.add_argument("-o", "--output", type=Path, help="optional evaluation JSON output")
+    return parser
+
+
+def build_tensorrt_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m hommi_train tensorrt",
+        description=(
+            "Compile <run-directory>/model.pt into a serialized Torch-TensorRT "
+            "Dynamo artifact."
+        ),
+    )
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=Path,
+        required=True,
+        help="run directory containing model.pt",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="output artifact path (default: <input>/model.trt.ep)",
+    )
+    parser.add_argument(
+        "--device",
+        default="cuda",
+        help="CUDA device used to build TensorRT engines (default: cuda)",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=("auto", "fp32", "bf16"),
+        default="auto",
+        help="TensorRT precision (default: auto)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        help="static deployment batch size (default: 1)",
+    )
     return parser
 
 
@@ -406,6 +447,22 @@ def _main_eval(argv: list[str]) -> int:
     return 0
 
 
+def _main_tensorrt(argv: list[str]) -> int:
+    args = build_tensorrt_parser().parse_args(argv)
+    from .export import compile_portable_model_tensorrt
+
+    result = compile_portable_model_tensorrt(
+        args.input,
+        output_path=args.output,
+        device=args.device,
+        precision=args.precision,
+        batch_size=args.batch_size,
+    )
+    for kind, path in result.items():
+        print(f"{kind}: {path}")
+    return 0
+
+
 def _main_export(argv: list[str]) -> int:
     args = build_export_parser().parse_args(argv)
     from .export import run_export
@@ -431,4 +488,6 @@ def main(argv: list[str] | None = None) -> int:
         return _main_eval(args[1:])
     if args and args[0] == "export":
         return _main_export(args[1:])
+    if args and args[0] == "tensorrt":
+        return _main_tensorrt(args[1:])
     return _main_train(args)

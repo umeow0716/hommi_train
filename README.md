@@ -600,6 +600,34 @@ uv sync --extra dev
 uv run python -m pytest
 ```
 
+### Build a TensorRT deployment artifact
+
+Compile the portable `model.pt` inside a completed run directory on the target CUDA/TensorRT machine:
+
+```bash
+uv run python -m hommi_train tensorrt -i runs/pick_place
+```
+
+This reads `runs/pick_place/model.pt` and writes:
+
+```text
+runs/pick_place/model.trt.ep
+runs/pick_place/model.trt.ep.json
+```
+
+The default deployment batch size is 1. Optional overrides:
+
+```bash
+uv run python -m hommi_train tensorrt \
+  -i runs/pick_place \
+  -o runs/pick_place/model.trt.ep \
+  --device cuda:0 \
+  --precision auto \
+  --batch-size 1
+```
+
+TensorRT artifacts are hardware/runtime specific. Build this artifact on the deployment target (for example, a Jetson Orin Nano with its JetPack-compatible PyTorch and Torch-TensorRT stack) rather than assuming a desktop-built TensorRT program is portable to Jetson.
+
 ## License
 
 See the repository license and third-party notices where applicable.

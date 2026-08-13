@@ -102,3 +102,14 @@ def test_cli_export_overrides() -> None:
     assert cfg.export.auto_export is False
     assert cfg.export.source == "last"
     assert cfg.export.artifact_name == "ema.pt"
+
+
+def test_tensorrt_cli_accepts_run_directory() -> None:
+    from hommi_train.cli import build_tensorrt_parser
+
+    args = build_tensorrt_parser().parse_args(
+        ["-i", "runs/pick_place", "--precision", "bf16", "--batch-size", "1"]
+    )
+    assert args.input == Path("runs/pick_place")
+    assert args.precision == "bf16"
+    assert args.batch_size == 1

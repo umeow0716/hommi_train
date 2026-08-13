@@ -79,3 +79,12 @@ def test_torch_export_pt2_round_trip_for_exportable_policy(tmp_path: Path) -> No
     output = exported.module()((x,))
     torch.testing.assert_close(output, x[:, -1:] * 2.0)
     assert '"obs_keys": ["x"]' in extra["hommi_metadata.json"]
+
+
+def test_tensorrt_directory_resolution(tmp_path: Path) -> None:
+    from hommi_train.export import default_tensorrt_path, resolve_model_path
+
+    model = tmp_path / "model.pt"
+    model.touch()
+    assert resolve_model_path(tmp_path) == model.resolve()
+    assert default_tensorrt_path(tmp_path) == (tmp_path / "model.trt.ep").resolve()
